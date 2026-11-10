@@ -94,7 +94,11 @@ const schema = (draft: boolean) => object({
     tasselCell: integer, eyeBallCell: integer, eyeCell: integer, spriteCell: integer,
     clothCell: integer }, ['clothCell']),
   view: object({ padTop: number, padSide: number, gazeCenter: point, irisTravel: positive }, ['gazeCenter', 'irisTravel']),
-}, ['buns', 'strands', 'accessories', 'hand', 'cloth', 'legs', 'arms']);
+  hitZones: array(object({ name: string, outline: polygon,
+    side: (v, p, e) => { if (v !== 'left' && v !== 'right') e.push(`${p}: expected "left" or "right"`); },
+    target: object({ kind: (v, p, e) => { if (v !== 'strand' && v !== 'cloth' && v !== 'limb') e.push(`${p}: expected "strand", "cloth" or "limb"`); }, name: string }),
+  }, ['side', 'target'])),
+}, ['buns', 'strands', 'accessories', 'hand', 'cloth', 'legs', 'arms', 'hitZones']);
 
 export function validateRig(value: unknown, options: { draft?: boolean } = {}): string[] {
   const errors: string[] = [];
@@ -177,6 +181,18 @@ export function validateRig(value: unknown, options: { draft?: boolean } = {}): 
       try { clothGrid(cloth); } catch (error) { errors.push(`rig.cloth[${i}]: ${error instanceof Error ? error.message : String(error)}`); }
     }
     clothNames.add(cloth.name);
+  }
+  const zoneNames = new Set<string>();
+  for (const [i, zone] of (rig.hitZones ?? []).entries()) {
+    const path = `rig.hitZones[${i}]`;
+    if (zone.name === 'none') errors.push(`${path}.name: "none" is reserved for a miss`);
+    else if (zoneNames.has(zone.name)) errors.push(`${path}.name: must be unique`);
+    zoneNames.add(zone.name);
+    if (zone.outline.some(([x, y]) => x < 0 || y < 0 || x > rig.image.width || y > rig.image.height))
+      errors.push(`${path}.outline: points must stay inside the image`);
+    const [a] = zone.outline;
+    const collinear = zone.outline.every(b => zone.outline.every(c => Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) < 1e-9));
+    if (collinear) errors.push(`${path}.outline: needs at least three non-collinear points`);
   }
   return errors;
 }

@@ -87,6 +87,17 @@ export interface Arms {
   bend?: number;
   inward?: number;
 }
+/**
+ * Optional named hit zone for pointer interaction (WebGL runtime only). The outline is in source
+ * pixels; array order sets priority. The name `none` is reserved for a miss. The runtime does not
+ * act on zones; it validates and preserves them for applications.
+ */
+export interface HitZone {
+  name: string;
+  outline: Point[];
+  side?: 'left' | 'right';
+  target?: { kind: 'strand' | 'cloth' | 'limb'; name: string };
+}
 export interface Leg { hip: Point; knee: Point; ankle: Point }
 /** Optional planted-foot weight transfer. Left/right refer to the image. */
 export interface Legs {
@@ -132,6 +143,7 @@ export interface Rig {
   cloth?: Cloth[];
   legs?: Legs;
   arms?: Arms;
+  hitZones?: HitZone[];
   mesh: {
     baseCell: number;
     fine: { x0: number; x1: number; y0: number; y1: number; cell: number };

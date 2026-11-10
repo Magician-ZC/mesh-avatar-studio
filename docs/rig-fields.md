@@ -312,3 +312,20 @@ not produce the same response. Calibrate with relaxed, visible arms.
 is present. Inspect sleeves, elbows, wrists and skirt edges in every frame. Reduce
 `swing`, `bend` or `inward` if the hand enters clothing; segmentation remnants in
 cut-out cloth must be corrected in the artwork rather than by increasing motion.
+
+## Optional hit zones
+
+Use `hitZones` to name regions that an application can recognise under the pointer, for example a
+ribbon or a hat. The runtime does not act on zones: it validates them, keeps them through parsing and
+packing, and leaves hit testing to the application. Without `hitZones` nothing changes. The native
+runtime ignores the field; it is described here for the WebGL runtime.
+
+| Field | Meaning |
+| --- | --- |
+| `hitZones[i].name` | Non-empty, unique zone name. `none` is reserved for a miss and cannot be used. |
+| `hitZones[i].outline` | At least three source-pixel points `[x,y]` inside the image that are not all collinear. |
+| `hitZones[i].side` | Optional `"left"` or `"right"` (image sides). |
+| `hitZones[i].target` | Optional `{ kind, name }` linking the zone to a `strand`, `cloth` or `limb` entry by name. |
+
+Array order sets priority: when outlines overlap, the earlier zone wins. Coordinates are in the same
+source pixels as every other rig field.

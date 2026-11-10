@@ -71,6 +71,19 @@ not included by `pack-avatar`. Without it the layer builder inpaints the covered
 | `lipSync` | Optional mouth-movement settings: `granularity`, `openness`, `closeSpeed` (each optional, finite 0–1, default 0.5). Optional `preset` records the editor selection (`calm`, `default`, `lively`, `subtle`, `big`, `custom`); playback always uses the numbers. An omitted or empty block preserves existing behavior. |
 | `expressions` | Optional per-expression settings for the live expressions shown with `setExpression`, keyed by expression name (`smile`, `shy`, `surprise`, `halfLidded`, `angry`, `sad`, `wink`). Each entry may set `mouthOpen` (finite, 0–1), the expression's resting mouth opening. An omitted block or field keeps the built-in value. |
 | `studio.version` | Optional version string identifying the Studio that prepared the avatar. |
+| `finalCapabilities` | Optional final capability list written by a hosting platform after quality checks (see below). |
+| `platform` | Optional ownership stamp written by a hosting platform: `avatarId`, `ownerId`, `region`, `issuedAt` (ISO 8601 date-time), `style` (non-empty strings) and `aiGenerated` (boolean), all required when the block is present. |
+
+`finalCapabilities` and `platform` are data for applications that host avatars; the runtime does not
+act on them and only validates and preserves them (WebGL runtime only; the native runtime ignores them).
+`finalCapabilities` mirrors a product capability list: `style` (string); `face` (`blink`, `mouth`, `gaze`,
+`brows`), `head` (`turn`, `roll`) and `body` (`breath`, `lean`, `sway`) with boolean flags; `legs` and
+`arms` (booleans); `limbs` (`{ name, kind, free }` items); `strands`, `cloth` and `zones` (string lists);
+and `motions` (`{ id, idle }` items). A field that is absent was not granted, and `false` values are kept, so a
+capability disabled by quality checks stays disabled after parsing and repacking. Unknown keys inside either
+block are ignored. Invalid values throw an error naming the path, such as
+`avatar.json.finalCapabilities.face.blink: expected a boolean`. Both blocks survive `pack-avatar`, including
+`--no-source`, which rewrites the manifest.
 
 For example, `"lipSync": { "granularity": 0, "openness": 0.5, "closeSpeed": 0,
 "preset": "calm" }` selects smoother, less frequent closures. Low `granularity` reacts only

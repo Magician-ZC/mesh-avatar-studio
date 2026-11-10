@@ -1,5 +1,6 @@
 import { parseLipSyncSettings, type LipSyncSettings } from '../engine/lip-sync.ts';
 import { parseExpressionSettings, type ExpressionSettings } from '../engine/expression-settings.ts';
+import { parseCapabilitiesData, parsePlatformData, type AvatarCapabilitiesData, type AvatarPlatformData } from './platform-data.ts';
 
 export interface AvatarManifest {
   format: 'mesh-avatar';
@@ -12,6 +13,10 @@ export interface AvatarManifest {
   studio?: { version: string };
   lipSync?: LipSyncSettings;
   expressions?: ExpressionSettings;
+  /** Final capability list from a hosting platform's quality checks (data only). */
+  finalCapabilities?: AvatarCapabilitiesData;
+  /** Ownership stamp from a hosting platform (data only). */
+  platform?: AvatarPlatformData;
 }
 
 export function parseManifest(input: unknown): AvatarManifest {
@@ -44,6 +49,14 @@ export function parseManifest(input: unknown): AvatarManifest {
     try {
       manifest.expressions = parseExpressionSettings(value.expressions);
     } catch (error) { errors.push(`avatar.json.expressions: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  if (value.finalCapabilities !== undefined) {
+    const capabilities = parseCapabilitiesData(value.finalCapabilities, 'avatar.json.finalCapabilities', errors);
+    if (capabilities) manifest.finalCapabilities = capabilities;
+  }
+  if (value.platform !== undefined) {
+    const platform = parsePlatformData(value.platform, 'avatar.json.platform', errors);
+    if (platform) manifest.platform = platform;
   }
   if (errors.length) throw new Error(errors.join('\n'));
   return manifest;
