@@ -50,6 +50,7 @@ export function createPhysics(engine, rig) {
       }
       this.strands = STRANDS.map(() => ({ p: null, v: [[0, 0], [0, 0], [0, 0], [0, 0]] }));
       this.out.strands = STRANDS.map(() => [[0, 0], [0, 0], [0, 0], [0, 0]]);
+      this.fringe = FRINGE;   // the first strands, bound into one sheet below (read by interaction impulses)
       this.chains = TASSELS.map(t => {
         const dx = t.tip[0] - t.pivot[0], dy = t.tip[1] - t.pivot[1], L = Math.hypot(dx, dy);
         const dir = [dx / L, dy / L];

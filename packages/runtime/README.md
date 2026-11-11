@@ -91,6 +91,29 @@ Emotion tags are `happy`, `sad`, `angry`, `surprised`, `relaxed` and `neutral` (
 
 For custom loading or tooling, the package also exports `createMeshAvatar`, `openAvatar`, `packAvatar`, `unpackAvatar`, `validateAvatarFiles`, `parseManifest`, `parseRig`, `validateRig` and lighting settings. See the [avatar format reference](https://github.com/shinshin86/mesh-avatar-studio/blob/main/docs/format.md) for archive contents, validation and compatibility rules.
 
+## Pointer interaction
+
+Map pointer events to source image pixels and give parts of the avatar a push. Both methods are WebGL runtime only.
+
+```js
+canvas.addEventListener('pointermove', event => {
+  // [x, y] in source image pixels, or null before the first frame is drawn
+  const point = avatar.toImagePoint(event.clientX, event.clientY);
+});
+
+// Instantaneous velocities in source pixels per second; the avatar's springs and pendulums let them settle.
+avatar.impulse({ kind: 'body' }, 160, 0);                              // sway the upper body to the right
+avatar.impulse({ kind: 'head' }, 0, 120);                              // a small nod
+avatar.impulse({ kind: 'strand', name: 'sideL' }, 600, 0);             // flick a hair strand (rig.strands[i].name)
+avatar.impulse({ kind: 'cloth', name: 'skirt', at: 0.3 }, -400, 0);    // push the hem near 30% of its length
+```
+
+`toImagePoint` follows the canvas position, border, CSS scaling, device pixel ratio, padding and `fit`.
+`impulse` changes velocities only, never positions. Each kind of target has an upper bound and larger
+values are truncated; a fringe strand shares its push with the neighbouring fringe strands it moves with;
+without `at` the whole hem of a garment moves. Unknown targets are ignored, and `limb` targets are reserved
+for limb chains. An avatar that never receives an impulse renders exactly as before.
+
 ## Mouth movement
 
 Three optional settings control audio loudness lip sync and kana previews. `granularity`

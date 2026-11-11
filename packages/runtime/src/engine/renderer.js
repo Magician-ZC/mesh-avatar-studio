@@ -481,11 +481,12 @@ export function createRenderer(engine, rig) {
       gl.drawArrays(gl.POINTS, 0, pts.length);
     }
 
-    // canvas CSS px -> source image px
+    // canvas CSS px -> source image px. Each axis has its own buffer/CSS ratio: the buffer sizes are rounded
+    // separately, and a canvas restyled since the last frame shows that frame stretched.
     toImage(cx, cy) {
       if (!this.pxOff) return null;   // pointer moved before the first frame was drawn
-      const dpr = this.canvas.width / this.canvas.clientWidth;
-      return [(cx * dpr - this.pxOff[0]) / this.pxScale, (cy * dpr - this.pxOff[1]) / this.pxScale];
+      const sx = this.canvas.width / this.canvas.clientWidth, sy = this.canvas.height / this.canvas.clientHeight;
+      return [(cx * sx - this.pxOff[0]) / this.pxScale, (cy * sy - this.pxOff[1]) / this.pxScale];
     }
   }
   return { Renderer, buildGrid };

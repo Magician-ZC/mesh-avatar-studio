@@ -5,7 +5,9 @@ import { createMeshAvatarImpl } from './createMeshAvatar.js';
 import { OVERLAY_EXPRESSIONS } from './expression-overlay.js';
 import type { LipSyncSettings } from './lip-sync';
 import type { ExpressionSettings } from './expression-settings';
+import type { ImpulseTarget } from '../interaction/impulse';
 
+export type { ImpulseTarget };
 export type LiveExpression = keyof typeof OVERLAY_EXPRESSIONS;
 export const LIVE_EXPRESSIONS = Object.keys(OVERLAY_EXPRESSIONS) as LiveExpression[];
 
@@ -50,6 +52,18 @@ export interface MeshAvatar {
   /** Override garment physics without rebuilding layers; null applies to every garment. */
   setClothTuning(name: string | null, tuning: Partial<ClothTuning>): void;
   onMotion(listener: (id: string | null) => void): () => void;
+  /**
+   * Map viewport coordinates (such as `PointerEvent.clientX/Y`) to source image pixels, following the canvas position,
+   * its device pixel ratio, padding and fit. Returns null before the first frame is drawn. WebGL runtime only.
+   */
+  toImagePoint(clientX: number, clientY: number): [number, number] | null;
+  /**
+   * Give a part an instantaneous velocity in source pixels per second; its springs or pendulums then let it settle.
+   * Each kind of target has an upper bound, and larger values are truncated. Unknown targets are ignored, and `limb`
+   * targets are reserved for limb chains. For `cloth`, `at` (0–1 along the hem) pushes the nearest columns; without
+   * it the whole hem moves. WebGL runtime only.
+   */
+  impulse(target: ImpulseTarget, vx: number, vy: number): void;
   advance(seconds: number, fps?: number): void;
   advanceParameters(seconds: number): void;
   destroy(): void;

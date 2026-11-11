@@ -5,6 +5,7 @@
 import { clothGrid, sampleLine } from './cloth-grid.js';
 import { pendulumSystem, stepPendulum } from './cloth-pendulum.js';
 import { CLOTH_DEFAULTS, CLOTH_OPTIONAL_DEFAULTS, checkClothTuning } from './cloth-tuning.js';
+import { clothImpulse } from '../interaction/impulse.ts';
 
 /** Evenly spaced points (by arc length) along a polyline. */
 function resample(line, n) {
@@ -125,6 +126,11 @@ export function createCloth(engine, rig) {
       checkClothTuning(tuning);
       if (name !== null && !Object.hasOwn(byName, name)) throw new RangeError(`Unknown cloth: ${name}`);
       for (const g of garments) if (name === null || g.c.name === name) Object.assign(g.tuning, tuning);
+    }
+
+    /** Interaction impulse (ER1, see ../interaction/impulse.ts); false for an unknown garment or when nothing moved. */
+    impulse(name, at, vx, vy) {
+      return Object.hasOwn(byName, name) && clothImpulse(byName[name], at, vx, vy);
     }
 
     /** Skin a layer mesh (rest/pos arrays in source px) to the named garment. */

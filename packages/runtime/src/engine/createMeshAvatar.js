@@ -11,6 +11,8 @@ import { Motion } from './motion.js';
 import { ExpressionOverlay } from './expression-overlay.js';
 import { parseExpressionSettings } from './expression-settings.ts';
 import { MOTIONS, IDLE_MOTIONS } from './motions.js';
+import { clientToImage } from '../interaction/coordinates.ts';
+import { createImpulse } from '../interaction/impulse.ts';
 
 const EYE_PARTS = ['ball', 'low', 'crease', 'lash'];   // back to front
 
@@ -182,6 +184,8 @@ export async function createMeshAvatarImpl(canvas, options) {
   if (options.lipSync !== undefined) motion.setLipSync(options.lipSync);
   const listeners = new Set();
   motion.onMotion = id => { for (const fn of listeners) fn(id); };
+  // pointer interaction (ER1): only runs when impulse() is called
+  const applyImpulse = createImpulse(rig, { motion, physics, cloth });
 
   let parameters = {}, parameterWeight = 1, parameterWeights = {}, lastParameters = {};
   const expression = new ExpressionOverlay(options.expressions === undefined ? undefined : parseExpressionSettings(options.expressions));
@@ -304,6 +308,10 @@ export async function createMeshAvatarImpl(canvas, options) {
     setClothTuning(name, tuning) { cloth.setTuning(name, tuning); },
     /** Called with the motion id when a motion starts and with null when it ends. */
     onMotion(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+    /** Viewport px (e.g. PointerEvent.clientX/Y) -> source image px; null before the first frame is drawn. */
+    toImagePoint(clientX, clientY) { return destroyed ? null : clientToImage(canvas, R, clientX, clientY); },
+    /** Instantaneous velocity (source px/s) for the body, head, a strand or a garment; unknown targets are ignored. */
+    impulse(target, vx, vy) { if (!destroyed) applyImpulse(target, vx, vy); },
     /** Advance the simulation by `sec` and draw (for tests / hidden tabs). */
     advance(sec, fps = 60) {
       if (destroyed) return;
