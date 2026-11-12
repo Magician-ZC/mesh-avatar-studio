@@ -3,11 +3,13 @@
 
 Run with: uv run --with numpy --with pillow --with opencv-python-headless
           tools/build-layers.py <project-dir> [--rig rig.draft.json]
-          [--hairmask mask.png] [--cloth-under keep]
+          [--hairmask mask.png] [--cloth-under keep] [--open-eyes]
 
 --hairmask takes the hair mask from a file (white is hair, exactly the size of source.png) instead of
 clustering hair colours. --cloth-under keep makes base_cloth.png the base with the garments kept: nothing
-is redrawn or inpainted under them and source_under.png is not read. Without them the output is unchanged.
+is redrawn or inpainted under them and source_under.png is not read. --open-eyes also cuts eye0_open.png and
+eye1_open.png: the source pixels around each eye, with a hole for the eye ball, which runtimes that know them
+show while the eye is fully open (older runtimes ignore them). Without these options the output is unchanged.
 """
 
 import argparse
@@ -26,6 +28,12 @@ from PIL import Image
 # The renderer samples each eye at 24 columns. Other constants below control
 # filtering, antialiasing and solver convergence, rather than illustration geometry.
 EYE_SAMPLES = 24
+# Open-eye layers (--open-eyes): fully opaque this far beyond the eye region (the line layers reach 2 px past
+# it), then fading out over pixels where the base is the source's own; the eye ball keeps the opening shrunk
+# by OPEN_EYE_HOLE, so the iris still follows the gaze.
+OPEN_EYE_MARGIN = 3
+OPEN_EYE_FEATHER = 4
+OPEN_EYE_HOLE = 2
 
 
 def polygon_mask(shape, poly):
@@ -591,6 +599,43 @@ def validate_inputs(rig, rgba):
         points(cloth["hem"], f"cloth[{i}].hem", 2)
 
 
+def ball_inside(shape, curves, margin):
+    """Pixels the renderer draws fully from the eye ball layer at rest: between its top and bottom lid curves
+    (sampled like the shader's crv(), at pixel centres) with `margin` px to spare beyond the clip's soft edge."""
+    h, w = shape
+    xs = np.arange(w) + 0.5
+    u = (xs - curves["x0"]) / max(curves["x1"] - curves["x0"], 1e-6)
+    samples = np.linspace(0, 1, EYE_SAMPLES)
+    top = np.interp(u, samples, curves["top"])
+    bot = np.interp(u, samples, curves["bot"])
+    ys = np.arange(h)[:, None] + 0.5
+    inside = (ys >= top + 0.5 + margin) & (ys <= bot - 0.9 - margin)
+    inside &= ((u >= 0) & (u <= 1))[None, :]
+    return inside
+
+
+def open_eye_layer(rgba, eye, covered):
+    """The source pixels around an open eye: everything the cut-out eye layers redraw (lines, lids, the eye
+    hole filled with skin), opaque over the eye region and a margin, fading out beyond it, with a hole where
+    the eye ball layer alone shows the drawing. `covered` (hand, accessories) stays out, so those layers leave
+    no copy behind when they move.
+    """
+    h, w = rgba.shape[:2]
+    region = polygon_mask((h, w), eye["roi"])
+    opening = polygon_mask((h, w), eye["opening"])
+    grow = 2 * OPEN_EYE_MARGIN + 1
+    area = cv2.dilate(region, np.ones((grow, grow), np.uint8))
+    distance = cv2.distanceTransform((area == 0).astype(np.uint8), cv2.DIST_L2, 5)
+    alpha = np.clip(1 - distance / (OPEN_EYE_FEATHER + 1), 0, 1)
+    shrink = 2 * OPEN_EYE_HOLE + 1
+    hole = (cv2.erode(opening, np.ones((shrink, shrink), np.uint8)) > 0) & ball_inside((h, w), eye_curves(eye), 1)
+    alpha[hole] = 0
+    alpha[covered > 0] = 0
+    layer = rgba.copy()
+    layer[..., 3] = np.rint(rgba[..., 3].astype(np.float32) * alpha).astype(np.uint8)
+    return crop_layer(layer, (layer[..., 3] > 0).astype(np.uint8) * 255, pad=1, soft=False)
+
+
 def read_hairmask(path, size):
     """An external hair mask: grayscale (or RGB) PNG, white where hair is, exactly the source size."""
     with Image.open(path) as image:
@@ -602,7 +647,7 @@ def read_hairmask(path, size):
         return np.array(image.convert("L"))
 
 
-def build(project, rig_path, hairmask=None, cloth_under="auto"):
+def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False):
     source = project / "source.png"
     rig_bytes = rig_path.read_bytes()
     rig = json.loads(rig_bytes)
@@ -618,6 +663,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto"):
         options += b"hairmask:" + hairmask.read_bytes()
     if cloth_under != "auto":
         options += f"cloth-under:{cloth_under}".encode()
+    if open_eyes:
+        options += b"open-eyes"
     build_id = hashlib.sha256(
         source.read_bytes() + rig_bytes + Path(__file__).read_bytes() + options
     ).hexdigest()[:12]
@@ -701,6 +748,9 @@ def build(project, rig_path, hairmask=None, cloth_under="auto"):
     images["hairmask"] = hair_mask(rgba, rig, external_hair)
     if rig.get("cloth"):
         build_cloth(project, rig, rgba, base, store, images, cloth_under)
+    if open_eyes:
+        for i, eye in enumerate(rig["eyes"]):
+            store(f"eye{i}_open", *open_eye_layer(rgba, eye, remove | accessory_bg))
 
     # Calculate everything before replacing files. Keep sprites and unrelated
     # assets intact; only filenames in this build's manifest are consumed.
@@ -747,9 +797,15 @@ def main():
         help="keep: base_cloth.png keeps the garments, without inpainting or source_under.png "
         "(default auto: source_under.png if present, else inpaint)",
     )
+    parser.add_argument(
+        "--open-eyes",
+        action="store_true",
+        help="also cut eye0_open.png and eye1_open.png, the source pixels around each eye that newer "
+        "runtimes show while the eye is fully open",
+    )
     args = parser.parse_args()
     try:
-        build(args.project_dir, args.project_dir / args.rig, args.hairmask, args.cloth_under)
+        build(args.project_dir, args.project_dir / args.rig, args.hairmask, args.cloth_under, args.open_eyes)
     except (OSError, ValueError, KeyError, TypeError, cv2.error) as error:
         print(f"build-layers: {error}", file=sys.stderr)
         return 1

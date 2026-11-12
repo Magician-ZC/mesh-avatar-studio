@@ -143,6 +143,7 @@ no extension or path separator.
 | `eye0_low`, `eye1_low` | Lower eyelid strokes. |
 | `eye0_crease`, `eye1_crease` | Eyelid crease strokes. A transparent image is valid when no crease is drawn. |
 | `eye0_lash`, `eye1_lash` | Upper lash strokes. |
+| `eye0_open`, `eye1_open` | Optional. The original pixels around the eye with a hole for the eye ball (`build-layers.py --open-eyes`). While the eye is fully open, runtimes that know them draw them over the eye layers, so the open eye shows exactly the illustration; they fade out as the lids start to move or a drawn eye sprite covers the eye, and deform like the base. Without them, or in older runtimes, the eye layers alone are drawn. |
 
 All four parts are required for each eye. Accessory names come from
 `rig.accessories[*].name`; each needs a rectangle and a corresponding PNG.

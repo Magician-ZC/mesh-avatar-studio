@@ -6,6 +6,7 @@ import { createRenderer } from './renderer.js';
 import { createPhysics } from './physics.js';
 import { createCloth } from './cloth.js';
 import { createSpriteModule, eyeMood } from './sprites.js';
+import { openEyeAlpha, openEyeLayerName } from './open-eyes.js';
 import { createOverlayLayers } from './overlays.js';
 import { Motion } from './motion.js';
 import { ExpressionOverlay } from './expression-overlay.js';
@@ -142,6 +143,21 @@ export async function createMeshAvatarImpl(canvas, options) {
     }
   });
 
+  // optional open-eye layers (see open-eyes.js): the drawn pixels over the cut-out lids while an eye is open
+  const openEyes = [];
+  for (let i = 0; i < EYES.length; i++) {
+    const n = openEyeLayerName(i);
+    if (!meta.layers?.[n]) continue;
+    const img = await loadImage(asset(`${n}.png`, meta.build));
+    const mesh = buildGrid(rects[n], rig.mesh.eyeCell, alphaOf(img), img.width);
+    const W = [];
+    for (let k = 0; k < mesh.rest.length / 2; k++) {
+      const x = mesh.rest[k * 2], y = mesh.rest[k * 2 + 1];
+      W.push(baseWeights(x, y, hairAt(x, y)));
+    }
+    openEyes.push({ eye: i, mesh, W, layer: R.addLayer(n, img, mesh, { face: true }) });
+  }
+
   // drawn eye / mouth variants (closed / half / smiling eyes, a/i/u/e/o mouths) over the face
   let sprites = null;
   try {
@@ -232,6 +248,18 @@ export async function createMeshAvatarImpl(canvas, options) {
     // the motion expression is not applied in manual mode, so only the live one counts there
     const cover = sprites?.update(P, phys, dt, eyeMood(expression.name, motion.mode === 'manual' ? null : motion.expr));
     if (cover) for (const ep of eyeParts) if (cover.eyes[ep.eye]) ep.layer.alpha = 0;
+    for (const oe of openEyes) {
+      const alpha = openEyeAlpha(oe.eye === 0 ? P.eyeROpen : P.eyeLOpen, oe.eye === 0 ? P.eyeSmile : (P.eyeSmileL ?? P.eyeSmile),
+        Boolean(sprites?.eyesDrawn[oe.eye]), Boolean(cover?.eyes[oe.eye]));
+      oe.layer.alpha = alpha;
+      oe.layer.visible = alpha > 0;
+      if (!oe.layer.visible) continue;
+      const r = oe.mesh.rest, o = oe.mesh.pos;
+      for (let k = 0; k < oe.W.length; k++) {
+        deformBase(r[k * 2], r[k * 2 + 1], oe.W[k], P, phys, tmp);
+        o[k * 2] = tmp[0]; o[k * 2 + 1] = tmp[1];
+      }
+    }
     overlays?.update(P, phys, deformBase, tmp);
     const hp = handMesh.pos, hr = handMesh.rest, HF = handFrame(P);
     for (let i = 0; i < handW.length; i++) {

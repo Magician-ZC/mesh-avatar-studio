@@ -47,7 +47,8 @@ explain coordinates and placement.
    This writes `rig.json` with 24 sampled points for each eye's top and bottom curves, plus
    `built/base.png`, `built/hairmask.png`, the four `eye{i}_ball/lash/low/crease.png` layers per
    eye, and `built/layers.json`. Hand and accessory layers are generated only when present
-   in the rig. The input draft remains unchanged. Existing generated files are replaced;
+   in the rig. With `--open-eyes` it also writes `eye{i}_open.png`, the original pixels around
+   each eye that the runtime shows while the eye is fully open. The input draft remains unchanged. Existing generated files are replaced;
    optional drawn sprites are preserved. Without `--rig`, the input is `rig.json`.
 4. In the editor, choose **Open project** and select it from the list, or browse for the whole project
    folder, including `source.png`, `rig.json` and `built/`. Use **Pose test** to check blinking

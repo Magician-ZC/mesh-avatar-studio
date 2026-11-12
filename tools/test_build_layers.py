@@ -114,6 +114,34 @@ class BuildLayersTest(unittest.TestCase):
         plain = build_id()
         self.assertEqual(build_id("--cloth-under", "auto"), plain)
         self.assertNotEqual(build_id("--cloth-under", "keep"), plain)
+        self.assertNotEqual(build_id("--open-eyes"), plain)
+
+    def test_open_eyes_keep_the_source_around_each_eye_with_a_hole_for_the_ball(self):
+        plain = self.run_cli()
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        meta = json.loads((self.project / "built/layers.json").read_text())
+        self.assertFalse([name for name in meta["layers"] if name.endswith("_open")])
+        self.assertFalse(list((self.project / "built").glob("eye*_open.png")))
+        result = self.run_cli("--open-eyes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        meta = json.loads((self.project / "built/layers.json").read_text())
+        with Image.open(self.project / "source.png") as image:
+            source = np.array(image.convert("RGBA"))
+        for i, left in enumerate((15, 65)):
+            x, y, w, h = meta["layers"][f"eye{i}_open"]
+            with Image.open(self.project / f"built/eye{i}_open.png") as image:
+                layer = np.array(image.convert("RGBA"))
+            self.assertEqual(layer.shape[:2], (h, w))
+
+            def at(px, py):
+                return layer[py - y, px - x]
+
+            self.assertEqual(at(left + 7, 27).tolist(), source[27, left + 7].tolist())  # the lash line
+            self.assertEqual(int(at(left + 7, 28)[3]), 255)  # the opening's edge stays over the ball's clip
+            self.assertEqual(int(at(left + 7, 32)[3]), 0)  # the ball itself shows through
+            self.assertEqual(int(at(left - 6, 30)[3]), 255)  # the eye region and its margin
+            self.assertTrue(0 < int(at(left - 9, 30)[3]) < 255)  # fading out beyond them
+            self.assertTrue(x > left - 13 and x + w <= left + 32)
 
     def test_cloth_layers_keep_legacy_base_and_generate_bare_base(self):
         self.rig['cloth'] = [{
