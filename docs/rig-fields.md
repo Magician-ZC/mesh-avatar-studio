@@ -10,7 +10,7 @@ radii and mesh cell sizes must be positive. Mesh cell sizes and fine-mesh rectan
 coordinates must be integers. Accessory boxes must be integer rectangles inside the image. A band is `[start, end]` with `start < end`.
 Ellipses are smooth influence regions, not hard cut-out boundaries.
 
-Only `buns`, `strands`, `accessories`, `hand`, `view.gazeCenter` and `view.irisTravel` are optional. Omit absent
+Only `buns`, `strands`, `accessories`, `hand`, `view.gazeCenter`, `view.irisTravel`, `view.rotation` and `physics` are optional. Omit absent
 optional groups. Required regions must still be placed even if their animation will be small.
 The initial draft has empty eye polygons and is intentionally invalid until they are traced.
 See [agent-guide.md](agent-guide.md) for the process and [rig-mapping.md](rig-mapping.md) for
@@ -147,6 +147,8 @@ the engine mapping. Do not copy the example illustration's coordinates into a ne
 | `view.padSide` | Each side viewport margin as fraction of source width; start at `0`, must exceed -0.5. |
 | `view.gazeCenter` | Optional pointer-follow origin `[x,y]`, px; between eyes; defaults to head centre. |
 | `view.irisTravel` | Optional iris travel at full gaze, px; defaults to `7`. Raise it for large eyes, around 15% of the eye opening width. |
+| `view.rotation` | Optional rotation of the whole drawing about the image centre, radians; default `0`. Use it for a figure that was turned upright to be bound (for example a lying pose): the rig stays upright and the avatar is shown the way the picture was. Fit and margins use the rotated image's bounding box; `toImagePoint` still returns unrotated source pixels. Lighting stays off on a rotated view. WebGL runtime only. |
+| `physics.gravity` | Optional direction things hang in, radians in source pixels (x right, y down); default `π/2`, straight down the image. Hair strands, buns and garments hang and sway along it, and the breeze and head-roll correction run across it. Set it to where real gravity points in the upright rig of a turned figure. WebGL runtime only. |
 
 Draft validation accepts omitted `x0/x1/top/bot` only as a complete group; supplying some of
 the four fields is an error. Complete rigs always require all four. Changing eye geometry

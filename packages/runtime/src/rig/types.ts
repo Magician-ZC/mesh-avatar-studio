@@ -150,5 +150,14 @@ export interface Rig {
     handCell: number; tasselCell: number; eyeBallCell: number;
     eyeCell: number; spriteCell: number; clothCell?: number;
   };
-  view: { padTop: number; padSide: number; gazeCenter?: Point; irisTravel?: number };
+  view: {
+    padTop: number; padSide: number; gazeCenter?: Point; irisTravel?: number;
+    /** Optional rotation of the whole drawing about the image centre, radians (default 0). WebGL runtime only. */
+    rotation?: number;
+  };
+  /** Optional physics settings. WebGL runtime only. */
+  physics?: {
+    /** Direction things hang in, radians in source pixels (default pi/2, straight down the image). */
+    gravity?: number;
+  };
 }

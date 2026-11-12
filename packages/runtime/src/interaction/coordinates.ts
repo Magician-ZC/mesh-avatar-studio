@@ -16,6 +16,11 @@ export interface ImageMapper {
   toImage(x: number, y: number): [number, number] | null;
 }
 
+/** The renderer's source px → canvas CSS px mapping (the inverse of `toImage`); null before the first frame is drawn. */
+export interface ClientMapper {
+  fromImage(x: number, y: number): [number, number] | null;
+}
+
 /**
  * Maps a viewport point (for example `PointerEvent.clientX/Y`) to source image pixels. Returns null before the first
  * frame is drawn, for non-finite input and while the canvas has no size. The bounding box includes CSS transforms
@@ -29,4 +34,18 @@ export function clientToImage(canvas: CanvasBox, renderer: ImageMapper, clientX:
   const scaleY = box.height > 0 && canvas.offsetHeight > 0 ? canvas.offsetHeight / box.height : 1;
   const point = renderer.toImage((clientX - box.left) * scaleX - canvas.clientLeft, (clientY - box.top) * scaleY - canvas.clientTop);
   return point && Number.isFinite(point[0]) && Number.isFinite(point[1]) ? [point[0], point[1]] : null;
+}
+
+/**
+ * Maps a source image point to viewport coordinates, the inverse of `clientToImage` (ER6: it follows the view rotation
+ * like the drawing does). Returns null before the first frame is drawn and for non-finite input.
+ */
+export function imageToClient(canvas: CanvasBox, renderer: ClientMapper, x: number, y: number): [number, number] | null {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const point = renderer.fromImage(x, y);
+  if (!point || !Number.isFinite(point[0]) || !Number.isFinite(point[1])) return null;
+  const box = canvas.getBoundingClientRect();
+  const scaleX = box.width > 0 && canvas.offsetWidth > 0 ? canvas.offsetWidth / box.width : 1;
+  const scaleY = box.height > 0 && canvas.offsetHeight > 0 ? canvas.offsetHeight / box.height : 1;
+  return [box.left + (point[0] + canvas.clientLeft) / scaleX, box.top + (point[1] + canvas.clientTop) / scaleY];
 }

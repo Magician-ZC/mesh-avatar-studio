@@ -1,7 +1,12 @@
+import { gravityFrame } from '../view/gravity.ts';
+
 /** @param {ReturnType<import('./rig.js').createRig>} engine
  * @param {import('../rig/types').Rig} rig */
 export function createPhysics(engine, rig) {
   const { applyHead, applyBody, TASSELS, tasselAnchor } = engine;
+  // ER6: rig.physics.gravity turns the hanging (head-roll) correction and the breeze, which run across gravity;
+  // null keeps the original code below (straight down the source image)
+  const G = gravityFrame(rig);
   const STRANDS = (rig.strands ?? []).map(strand => {
     if (strand.nodes.length === 4) return strand;
     const nodes = Array.from({ length: 4 }, (_, i) => {
@@ -86,8 +91,15 @@ export function createPhysics(engine, rig) {
             // mostly one shared breeze, with a little per-strand flutter
             const wind = (Math.sin(t * 1.3) * 0.5 + Math.sin(t * 3.1) * 0.3 + Math.sin(t * 4.7 + phase) * 0.2) * cfg.max * 0.1 * j / 3;
             const parent = [st.p[j - 1][0] - target[j - 1][0], st.p[j - 1][1] - target[j - 1][1]];
-            const tx = target[j][0] + parent[0] * STRAND_COUPLE * HAIR_TUNE.couple - Math.sin(roll) * hang * 0.12 + wind;
-            const ty = target[j][1] + parent[1] * STRAND_COUPLE * HAIR_TUNE.couple;
+            let tx, ty;
+            if (G) {
+              const across = -Math.sin(roll) * hang * 0.12 + wind;
+              tx = target[j][0] + parent[0] * STRAND_COUPLE * HAIR_TUNE.couple + across * G.across[0];
+              ty = target[j][1] + parent[1] * STRAND_COUPLE * HAIR_TUNE.couple + across * G.across[1];
+            } else {
+              tx = target[j][0] + parent[0] * STRAND_COUPLE * HAIR_TUNE.couple - Math.sin(roll) * hang * 0.12 + wind;
+              ty = target[j][1] + parent[1] * STRAND_COUPLE * HAIR_TUNE.couple;
+            }
             const k = STRAND_K[j] * cfg.k * HAIR_TUNE.stiff / Math.max(0.35, g), c = STRAND_DAMP * HAIR_TUNE.damp * Math.sqrt(HAIR_TUNE.stiff) / Math.max(0.5, Math.sqrt(g));
             const v = st.v[j], q = st.p[j];
             v[0] += (k * (tx - q[0]) - c * v[0]) * h;
@@ -107,8 +119,11 @@ export function createPhysics(engine, rig) {
         const a = this.hairAnchor(cfg.at, P);
         // hanging hair keeps pointing down when the head rolls; plus a light breeze
         const wind = Math.sin(this.time * 1.3 + cfg.at[0] * 0.01) * 0.6 + Math.sin(this.time * 2.9 + cfg.at[1] * 0.02) * 0.4;
-        const tx = a[0] - Math.sin(roll) * cfg.hang + wind * cfg.max * 0.12;
-        const ty = a[1];
+        let tx = a[0] - Math.sin(roll) * cfg.hang + wind * cfg.max * 0.12, ty = a[1];
+        if (G) {
+          const across = -Math.sin(roll) * cfg.hang + wind * cfg.max * 0.12;
+          tx = a[0] + across * G.across[0]; ty = a[1] + across * G.across[1];
+        }
         if (!s.p) s.p = [tx, ty];
         const k2 = cfg.k / Math.max(0.35, g), c2 = cfg.c / Math.max(0.5, Math.sqrt(g));
         for (let i = 0; i < sub; i++) {

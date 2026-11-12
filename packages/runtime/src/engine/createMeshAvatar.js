@@ -12,7 +12,7 @@ import { Motion } from './motion.js';
 import { ExpressionOverlay } from './expression-overlay.js';
 import { parseExpressionSettings } from './expression-settings.ts';
 import { MOTIONS, IDLE_MOTIONS } from './motions.js';
-import { clientToImage } from '../interaction/coordinates.ts';
+import { clientToImage, imageToClient } from '../interaction/coordinates.ts';
 import { createImpulse } from '../interaction/impulse.ts';
 
 const EYE_PARTS = ['ball', 'low', 'crease', 'lash'];   // back to front
@@ -338,6 +338,8 @@ export async function createMeshAvatarImpl(canvas, options) {
     onMotion(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     /** Viewport px (e.g. PointerEvent.clientX/Y) -> source image px; null before the first frame is drawn. */
     toImagePoint(clientX, clientY) { return destroyed ? null : clientToImage(canvas, R, clientX, clientY); },
+    /** Source image px -> viewport px (the inverse of toImagePoint, following view.rotation); null before the first frame. */
+    toClientPoint(x, y) { return destroyed ? null : imageToClient(canvas, R, x, y); },
     /** Instantaneous velocity (source px/s) for the body, head, a strand or a garment; unknown targets are ignored. */
     impulse(target, vx, vy) { if (!destroyed) applyImpulse(target, vx, vy); },
     /** Advance the simulation by `sec` and draw (for tests / hidden tabs). */

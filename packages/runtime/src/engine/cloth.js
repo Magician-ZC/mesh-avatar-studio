@@ -6,6 +6,7 @@ import { clothGrid, sampleLine } from './cloth-grid.js';
 import { pendulumSystem, stepPendulum } from './cloth-pendulum.js';
 import { CLOTH_DEFAULTS, CLOTH_OPTIONAL_DEFAULTS, checkClothTuning } from './cloth-tuning.js';
 import { clothImpulse } from '../interaction/impulse.ts';
+import { gravityFrame, splitByGravity } from '../view/gravity.ts';
 
 /** Evenly spaced points (by arc length) along a polyline. */
 function resample(line, n) {
@@ -27,6 +28,9 @@ function resample(line, n) {
 export function createCloth(engine, rig) {
   const { baseWeights, deformBase } = engine;
   const TUNE = { bounceHz: 2.6, zeta: 0.25 };
+  // ER6: with rig.physics.gravity the columns hang along it: the waist acceleration is split across and along gravity
+  // and the small bounce moves along it. null keeps the original code (straight down the source image).
+  const G = gravityFrame(rig);
 
   // Adult hip-to-ankle length≈0.8m; if joints are unavailable, assume the
   // illustration spans a 1.6m figure. Cropped/stylized art can override mm/px.
@@ -171,6 +175,11 @@ export function createCloth(engine, rig) {
           }
         }
         g.previous = pivots;
+        // the solvers below read [across, along] gravity; for the default that is [x, y]
+        if (G) for (let k = 0; k < cols; k++) {
+          const [across, along] = splitByGravity(G, acceleration[k * 2], acceleration[k * 2 + 1]);
+          acceleration[k * 2] = across; acceleration[k * 2 + 1] = along;
+        }
         const frequencyMultiplier = swing * Math.sqrt(stiffness);
         const verticalOmega = 2 * Math.PI * TUNE.bounceHz;
         if (g.grid.custom) {
@@ -223,7 +232,8 @@ export function createCloth(engine, rig) {
                 const a = sampleLine(seam, js[j]), b = sampleLine(seam, v), u = (v - js[j]) / (js[j + 1] - js[j]);
                 const theta = angles[j] * (1 - 0.1 * (1 - follow) * (1 - u)), x = b[0] - a[0], y = b[1] - a[1], i = (r * cols + k) * 2;
                 destination[i] = joints[j][0] + x * Math.cos(theta) + y * Math.sin(theta);
-                destination[i + 1] = joints[j][1] - x * Math.sin(theta) + y * Math.cos(theta) + vertical * v;
+                destination[i + 1] = joints[j][1] - x * Math.sin(theta) + y * Math.cos(theta) + (G ? 0 : vertical * v);
+                if (G) { destination[i] += vertical * v * G.down[0]; destination[i + 1] += vertical * v * G.down[1]; }
               }
             }
           };
@@ -304,7 +314,8 @@ export function createCloth(engine, rig) {
             const rotation = (first ? theta : lower) * (1 - bend + bend * u), c = Math.cos(rotation), s = Math.sin(rotation);
             const x = halfX * u, y = halfY * u;
             destination[i] = (first ? anchors[top] : jointX) + x * c + y * s;
-            destination[i + 1] = (first ? anchors[top + 1] : jointY) - x * s + y * c + vertical * v;
+            destination[i + 1] = (first ? anchors[top + 1] : jointY) - x * s + y * c + (G ? 0 : vertical * v);
+            if (G) { destination[i] += vertical * v * G.down[0]; destination[i + 1] += vertical * v * G.down[1]; }
           }
         }
         };

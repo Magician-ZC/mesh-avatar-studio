@@ -2,11 +2,14 @@ import { layerNormals } from '../lighting/normals';
 import { DEFAULT_LIGHTING, parseLighting } from '../lighting/settings';
 import { TERMINATOR, DETAIL_SCALE, SHADOW_SATURATION, MAX_IRRADIANCE, headRotation } from '../lighting/shading';
 import { DropShadow } from '../lighting/shadow';
+import { deviceToSource, placeView, rotateVertexShader, sourceToDevice, viewRotation } from '../view/rotation.ts';
 
 /** @param {ReturnType<import('./rig.js').createRig>} engine
  * @param {import('../rig/types').Rig} rig */
 export function createRenderer(engine, rig) {
   const { IMG, EYES, MOUTH, CHEEKS } = engine;
+  // ER6: the whole drawing turns by rig.view.rotation about the image centre; 0 keeps the original shaders and fit
+  const ROTATION = viewRotation(rig);
   // WebGL2 renderer: textured grid meshes whose vertices are deformed on the CPU,
   // plus a fragment-shader pass for eyelids, eye balls, mouth and blush on the base layer.
 
@@ -280,8 +283,8 @@ export function createRenderer(engine, rig) {
       const gl = canvas.getContext('webgl2', { premultipliedAlpha: true, antialias: true, alpha: true, preserveDrawingBuffer: true });
       if (!gl) throw new Error('WebGL2 is not available');
       this.gl = gl; this.canvas = canvas;
-      this.main = compile(gl, VS, FS);
-      this.line = compile(gl, LINE_VS, LINE_FS);
+      this.main = compile(gl, ROTATION ? rotateVertexShader(VS) : VS, FS);
+      this.line = compile(gl, ROTATION ? rotateVertexShader(LINE_VS) : LINE_VS, LINE_FS);
       this.layers = [];
       this.lighting = DEFAULT_LIGHTING;
       this.lightingStats = { normalMs: 0, computedLayers: 0, cachedLayers: 0 };
@@ -351,6 +354,8 @@ export function createRenderer(engine, rig) {
 
     setLighting(value) {
       this.lighting = parseLighting({ ...DEFAULT_LIGHTING, ...value }) ?? DEFAULT_LIGHTING;
+      // lighting is not supported on a rotated view yet (ER6): it stays off
+      if (ROTATION) this.lighting = { ...this.lighting, enabled: false };
       if (!this.lighting.enabled) return;
       const gl = this.gl;
       if (!this.lit) this.lit = compile(gl, LIGHT_VS, LIGHT_FS);
@@ -382,6 +387,15 @@ export function createRenderer(engine, rig) {
       const c = this.canvas, dpr = Math.min(window.devicePixelRatio || 1, 2);
       const w = Math.round(c.clientWidth * dpr), h = Math.round(c.clientHeight * dpr);
       if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+      if (ROTATION) {
+        // ER6: fit the rotated image's bounding box; vertices turn about the image centre in the vertex shader
+        const view = placeView([w, h], IMG, this.pad, this.fit, ROTATION);
+        this.view = view;
+        this.scale = [2 * view.scale / w, -2 * view.scale / h];
+        this.offset = [-1 + 2 * view.offset[0] / w, 1 - 2 * view.offset[1] / h];
+        this.pxScale = view.scale; this.pxOff = view.offset;
+        return;
+      }
       // Contain anchors the cut-off body to the bottom; cover crops around the image center.
       const s = (this.fit === 'cover' ? Math.max : Math.min)(w / (IMG.w * (1 + 2 * this.pad.side)), h / (IMG.h * (1 + this.pad.top)));
       const ox = (w - IMG.w * s) / 2, oy = (h - IMG.h * s) / (this.fit === 'cover' ? 2 : 1);
@@ -414,6 +428,7 @@ export function createRenderer(engine, rig) {
         gl.uniformMatrix3fv(m.u.uHeadRotation, false, headRotation(state.angleX ?? 0, state.angleY ?? 0, state.angleZ ?? 0, rig.head.maxRoll));
       }
       gl.uniform2fv(m.u.uScale, this.scale); gl.uniform2fv(m.u.uOffset, this.offset);
+      if (ROTATION) gl.uniform4f(m.u.uView, this.view.cos, this.view.sin, this.view.centre[0], this.view.centre[1]);
       gl.uniform1i(m.u.uTex, 0);
       gl.uniform4fv(m.u.uEyeBox, EYES.flatMap(e => [e.x0, e.x1, 0, 0]));
       gl.uniform1fv(m.u.uEyeTop, EYES.flatMap(e => e.top));
@@ -437,6 +452,7 @@ export function createRenderer(engine, rig) {
         const l = this.line;
         gl.useProgram(l.prog);
         gl.uniform2fv(l.u.uScale, this.scale); gl.uniform2fv(l.u.uOffset, this.offset);
+        if (ROTATION) gl.uniform4f(l.u.uView, this.view.cos, this.view.sin, this.view.centre[0], this.view.centre[1]);
         for (const L of this.layers) {
           if (!L.visible || L.overlay) continue;
           gl.bindVertexArray(L.vao);
@@ -486,7 +502,17 @@ export function createRenderer(engine, rig) {
     toImage(cx, cy) {
       if (!this.pxOff) return null;   // pointer moved before the first frame was drawn
       const sx = this.canvas.width / this.canvas.clientWidth, sy = this.canvas.height / this.canvas.clientHeight;
+      // ER6: undo the view rotation, so the result is still in unrotated source pixels
+      if (ROTATION) return deviceToSource(this.view, cx * sx, cy * sy);
       return [(cx * sx - this.pxOff[0]) / this.pxScale, (cy * sy - this.pxOff[1]) / this.pxScale];
+    }
+
+    // source image px -> canvas CSS px (the inverse of toImage); null before the first frame is drawn
+    fromImage(x, y) {
+      if (!this.pxOff) return null;
+      const sx = this.canvas.width / this.canvas.clientWidth, sy = this.canvas.height / this.canvas.clientHeight;
+      const [dx, dy] = ROTATION ? sourceToDevice(this.view, x, y) : [x * this.pxScale + this.pxOff[0], y * this.pxScale + this.pxOff[1]];
+      return [dx / sx, dy / sy];
     }
   }
   return { Renderer, buildGrid };

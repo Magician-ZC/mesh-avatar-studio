@@ -93,12 +93,13 @@ const schema = (draft: boolean) => object({
     y0: wholeNumber, y1: wholeNumber, cell: integer }), handCell: integer,
     tasselCell: integer, eyeBallCell: integer, eyeCell: integer, spriteCell: integer,
     clothCell: integer }, ['clothCell']),
-  view: object({ padTop: number, padSide: number, gazeCenter: point, irisTravel: positive }, ['gazeCenter', 'irisTravel']),
+  view: object({ padTop: number, padSide: number, gazeCenter: point, irisTravel: positive, rotation: number }, ['gazeCenter', 'irisTravel', 'rotation']),
+  physics: object({ gravity: number }, ['gravity']),
   hitZones: array(object({ name: string, outline: polygon,
     side: (v, p, e) => { if (v !== 'left' && v !== 'right') e.push(`${p}: expected "left" or "right"`); },
     target: object({ kind: (v, p, e) => { if (v !== 'strand' && v !== 'cloth' && v !== 'limb') e.push(`${p}: expected "strand", "cloth" or "limb"`); }, name: string }),
   }, ['side', 'target'])),
-}, ['buns', 'strands', 'accessories', 'hand', 'cloth', 'legs', 'arms', 'hitZones']);
+}, ['buns', 'strands', 'accessories', 'hand', 'cloth', 'legs', 'arms', 'hitZones', 'physics']);
 
 export function validateRig(value: unknown, options: { draft?: boolean } = {}): string[] {
   const errors: string[] = [];

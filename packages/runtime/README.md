@@ -100,6 +100,8 @@ canvas.addEventListener('pointermove', event => {
   // [x, y] in source image pixels, or null before the first frame is drawn
   const point = avatar.toImagePoint(event.clientX, event.clientY);
 });
+// the other way round: where a source pixel is on the page (for example to frame the head)
+const [left, top] = avatar.toClientPoint(rig.head.cx, rig.head.cy) ?? [0, 0];
 
 // Instantaneous velocities in source pixels per second; the avatar's springs and pendulums let them settle.
 avatar.impulse({ kind: 'body' }, 160, 0);                              // sway the upper body to the right
@@ -108,7 +110,8 @@ avatar.impulse({ kind: 'strand', name: 'sideL' }, 600, 0);             // flick 
 avatar.impulse({ kind: 'cloth', name: 'skirt', at: 0.3 }, -400, 0);    // push the hem near 30% of its length
 ```
 
-`toImagePoint` follows the canvas position, border, CSS scaling, device pixel ratio, padding and `fit`.
+`toImagePoint` and its inverse `toClientPoint` follow the canvas position, border, CSS scaling, device pixel ratio, padding,
+`fit` and the optional `view.rotation`.
 `impulse` changes velocities only, never positions. Each kind of target has an upper bound and larger
 values are truncated; a fringe strand shares its push with the neighbouring fringe strands it moves with;
 without `at` the whole hem of a garment moves. Unknown targets are ignored, and `limb` targets are reserved

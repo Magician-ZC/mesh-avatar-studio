@@ -58,6 +58,11 @@ export interface MeshAvatar {
    */
   toImagePoint(clientX: number, clientY: number): [number, number] | null;
   /**
+   * Map a source image pixel to viewport coordinates: the inverse of `toImagePoint`. With `view.rotation` both follow the
+   * rotated drawing. Returns null before the first frame is drawn. WebGL runtime only.
+   */
+  toClientPoint(x: number, y: number): [number, number] | null;
+  /**
    * Give a part an instantaneous velocity in source pixels per second; its springs or pendulums then let it settle.
    * Each kind of target has an upper bound, and larger values are truncated. Unknown targets are ignored, and `limb`
    * targets are reserved for limb chains. For `cloth`, `at` (0–1 along the hem) pushes the nearest columns; without
