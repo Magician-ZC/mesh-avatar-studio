@@ -23,8 +23,11 @@ function json(bytes: Uint8Array, path: string) {
   try { return decode(bytes); }
   catch { throw new Error(`${path}: invalid UTF-8 JSON`); }
 }
-function assetNames(layers: { layers?: Record<string, unknown> }, sprites?: { layers?: Record<string, unknown> }, overlays?: { overlays?: unknown }, rig?: { cloth?: unknown[] }) {
-  return ['layers.json', 'base.png', 'hairmask.png', ...(rig?.cloth?.length ? ['base_cloth.png'] : []), ...Object.keys(layers?.layers ?? {}).map(name => `${name}.png`),
+function assetNames(layers: { layers?: Record<string, unknown>; bare?: unknown }, sprites?: { layers?: Record<string, unknown> }, overlays?: { overlays?: unknown }, rig?: { cloth?: unknown[] }) {
+  return ['layers.json', 'base.png', 'hairmask.png', ...(rig?.cloth?.length ? ['base_cloth.png'] : []),
+    // the base without limb chains (ER4); a malformed name is left to validateAvatarFiles
+    ...(typeof layers?.bare === 'string' && /^[A-Za-z0-9_-]+$/.test(layers.bare) ? [`${layers.bare}.png`] : []),
+    ...Object.keys(layers?.layers ?? {}).map(name => `${name}.png`),
     ...(sprites ? ['sprites/sprites.json', ...Object.keys(sprites.layers ?? {}).map(name => `sprites/${name}.png`)] : []),
     // malformed entries are left to validateAvatarFiles, which reports them
     ...(overlays ? ['overlays/overlays.json', ...(Array.isArray(overlays.overlays) ? overlays.overlays as { file?: unknown }[] : [])

@@ -1,0 +1,5 @@
+---
+"mesh-avatar": minor
+---
+
+Add optional generic limb chains, `rig.limbs` (WebGL runtime only), for poses that the hanging `arms` and planted `legs` do not cover. Each limb is a two-bone chain (`joints`: root, middle, end) cut into its own layer `limb_<name>` along its `outline`; the layer builder also writes `base_bare.png`, the base without the limbs, named by the new optional `layers.json` field `bare` (`base.png` keeps the limbs for older runtimes). The parameters `limb:<name>:swing` and `limb:<name>:bend` (-1..1, times the limb's `swing` and `bend` limits, default 4 and 6 degrees, at most 10 and 12) turn the chain about its root and bend it at the middle joint; the root follows the base drawing and the limb's own motion fades in along the first bone, so the cut where the limb meets the body never opens, and the bones blend along their own direction rather than by image height. Idle limbs sway slowly and slightly, `impulse({ kind: 'limb', name })` swings a limb, and `mesh.limbCell` sets the limb mesh spacing. Rigs without `limbs` render exactly as before.

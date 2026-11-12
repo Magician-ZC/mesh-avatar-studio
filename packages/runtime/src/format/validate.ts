@@ -83,9 +83,14 @@ export function validateAvatarFiles(files: Record<string, FileData>): string[] {
     if (rig && rectangles) {
       const required = [...rig.eyes.flatMap((_, i) => ['ball', 'low', 'crease', 'lash'].map(part => `eye${i}_${part}`)),
         ...(rig.hand ? ['hand'] : []), ...(rig.accessories ?? []).map(part => part.name),
-        ...(rig.cloth ?? []).map(part => `cloth_${part.name}`)];
+        ...(rig.cloth ?? []).map(part => `cloth_${part.name}`), ...(rig.limbs ?? []).map(part => `limb_${part.name}`)];
       for (const name of required) if (!own(rectangles, name)) errors.push(`built/layers.json.layers.${name}: missing required layer`);
     }
+    // ER4: the base without the limbs, named by layers.json "bare" (required for rig.limbs)
+    if (meta.bare !== undefined) {
+      if (typeof meta.bare !== 'string' || !/^[A-Za-z0-9_-]+$/.test(meta.bare)) errors.push('built/layers.json.bare: expected a safe layer name');
+      else image(`built/${meta.bare}.png`);
+    } else if (rig?.limbs?.length) errors.push('built/layers.json.bare: required for rig.limbs (the base without the limbs)');
     if (!Array.isArray(meta.eyes) || meta.eyes.length !== 2) {
       errors.push('built/layers.json.eyes: expected two eye curves');
     } else meta.eyes.forEach((eye: unknown, i: number) => {

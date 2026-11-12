@@ -10,10 +10,14 @@ clustering hair colours. --cloth-under keep makes base_cloth.png the base with t
 is redrawn or inpainted under them and source_under.png is not read. --open-eyes also cuts eye0_open.png and
 eye1_open.png: the source pixels around each eye, with a hole for the eye ball, which runtimes that know them
 show while the eye is fully open (older runtimes ignore them). Without these options the output is unchanged.
+
+A rig with `limbs` (generic limb chains) also gets limb_<name>.png for every limb and base_bare.png, the base without
+them, named by "bare" in layers.json (see tools/limbs/layers.py); base.png keeps the limbs for older runtimes.
 """
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import re
@@ -34,6 +38,26 @@ EYE_SAMPLES = 24
 OPEN_EYE_MARGIN = 3
 OPEN_EYE_FEATHER = 4
 OPEN_EYE_HOLE = 2
+
+
+LIMB_LAYERS = Path(__file__).resolve().parent / "limbs" / "layers.py"
+_limb_layers = None
+
+
+def limb_layers():
+    """tools/limbs/layers.py, loaded from this folder without writing bytecode (only rigs with limbs need it)."""
+    global _limb_layers
+    if _limb_layers is None:
+        spec = importlib.util.spec_from_file_location("mesh_avatar_limb_layers", LIMB_LAYERS)
+        module = importlib.util.module_from_spec(spec)
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        _limb_layers = module
+    return _limb_layers
 
 
 def polygon_mask(shape, poly):
@@ -597,6 +621,8 @@ def validate_inputs(rig, rgba):
         points(cloth["outline"], f"cloth[{i}].outline")
         points(cloth["waist"], f"cloth[{i}].waist", 2)
         points(cloth["hem"], f"cloth[{i}].hem", 2)
+    if rig.get("limbs"):
+        limb_layers().validate(rig, (h, w), names)
 
 
 def ball_inside(shape, curves, margin):
@@ -665,6 +691,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False)
         options += f"cloth-under:{cloth_under}".encode()
     if open_eyes:
         options += b"open-eyes"
+    if rig.get("limbs"):  # only rigs with limbs depend on the limb cutter
+        options += b"limbs:" + LIMB_LAYERS.read_bytes()
     build_id = hashlib.sha256(
         source.read_bytes() + rig_bytes + Path(__file__).read_bytes() + options
     ).hexdigest()[:12]
@@ -748,9 +776,16 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False)
     images["hairmask"] = hair_mask(rgba, rig, external_hair)
     if rig.get("cloth"):
         build_cloth(project, rig, rgba, base, store, images, cloth_under)
+    limbs = np.zeros((h, w), np.uint8)
+    if rig.get("limbs"):
+        # the runtime base is base_cloth with garments, base otherwise; base_bare is that without the limbs
+        images["base_bare"] = limb_layers().cut(rgba, images.get("base_cloth", images["base"]), rig, store)
+        meta["bare"] = "base_bare"
+        for mask in limb_layers().masks(rgba, rig):
+            limbs[mask] = 255
     if open_eyes:
         for i, eye in enumerate(rig["eyes"]):
-            store(f"eye{i}_open", *open_eye_layer(rgba, eye, remove | accessory_bg))
+            store(f"eye{i}_open", *open_eye_layer(rgba, eye, remove | accessory_bg | limbs))
 
     # Calculate everything before replacing files. Keep sprites and unrelated
     # assets intact; only filenames in this build's manifest are consumed.

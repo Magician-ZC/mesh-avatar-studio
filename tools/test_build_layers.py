@@ -173,6 +173,85 @@ class BuildLayersTest(unittest.TestCase):
                 with Image.open(self.project / 'built/cloth_skirt.png') as image:
                     self.assertGreater(image.getchannel('A').getextrema()[1], 0)
 
+    def add_limb(self):
+        """A dangling leg over a transparent background: its upper part overlaps the body block."""
+        image = Image.new("RGBA", (100, 80), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((5, 10, 95, 50), fill=(190, 210, 230, 255))  # the body, with the eyes on it
+        for left in (15, 65):
+            draw.rectangle((left, 28, left + 15, 36), fill=(255, 255, 255, 255))
+            draw.line((left, 27, left + 15, 27), fill=(15, 25, 50, 255), width=2)
+        draw.rectangle((40, 44, 52, 78), fill=(200, 120, 60, 255))  # the leg, hanging below the body
+        draw.line((40, 78, 52, 78), fill=(200, 120, 60, 128))  # an antialiased foot edge
+        image.save(self.project / "source.png")
+        self.rig["limbs"] = [{
+            "name": "leg_left", "kind": "leg", "joints": [[46, 45], [46, 62], [46, 77]],
+            "outline": [[38, 43], [54, 43], [54, 79], [38, 79]],
+        }]
+        self.draft.write_text(json.dumps(self.rig))
+        return np.array(image)
+
+    def test_limbs_cut_their_layer_and_a_bare_base_that_continues_only_visible_pixels(self):
+        source = self.add_limb()
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        meta = json.loads((self.project / "built/layers.json").read_text())
+        self.assertEqual(meta["bare"], "base_bare")
+        x, y, w, h = meta["layers"]["limb_leg_left"]
+        with Image.open(self.project / "built/limb_leg_left.png") as image:
+            limb = np.array(image.convert("RGBA"))
+        with Image.open(self.project / "built/base_bare.png") as image:
+            bare = np.array(image.convert("RGBA"))
+        with Image.open(self.project / "built/base.png") as image:
+            base = np.array(image.convert("RGBA"))
+        self.assertEqual(limb.shape[:2], (h, w))
+        # the layer is the source inside the outline, alpha included
+        self.assertEqual(limb[60 - y, 46 - x].tolist(), source[60, 46].tolist())
+        self.assertEqual(limb[78 - y, 46 - x].tolist(), source[78, 46].tolist())
+        # base.png keeps the limb for older runtimes; the bare base continues the body under the limb's top
+        self.assertEqual(base[60, 46].tolist(), source[60, 46].tolist())
+        self.assertEqual(int(bare[47, 46, 3]), 255)
+        self.assertLess(np.abs(bare[47, 46, :3].astype(int) - (190, 210, 230)).max(), 12)
+        # ...and stays transparent where the limb hangs over the background, or behind its soft edge
+        self.assertEqual(int(bare[65, 46, 3]), 0)
+        self.assertEqual(int(bare[78, 46, 3]), 0)
+        # outside the limb the bare base is the base
+        self.assertEqual(bare[30, 90].tolist(), base[30, 90].tolist())
+        # at rest the limb over the bare base shows the source exactly
+        over = bare.astype(np.float32)
+        layer = np.zeros_like(over)
+        layer[y:y + h, x:x + w] = limb
+        a = layer[..., 3:4] / 255
+        rgb = layer[..., :3] * a + over[..., :3] * over[..., 3:4] / 255 * (1 - a)
+        alpha = layer[..., 3:4] + over[..., 3:4] * (1 - a)
+        region = (slice(43, 80), slice(38, 55))
+        expected = source[..., :3].astype(np.float32) * source[..., 3:4] / 255
+        self.assertLess(np.abs(rgb[region] - expected[region]).max(), 1.0)
+        self.assertLess(np.abs(alpha[region][..., 0] - source[region][..., 3]).max(), 1.0)
+        rig = json.loads((self.project / "rig.json").read_text())
+        self.assertEqual(rig["limbs"][0]["name"], "leg_left")
+
+    def test_limb_input_checks(self):
+        self.add_limb()
+        (self.project / "built").mkdir(exist_ok=True)
+        (self.project / "built/layers.json").write_text("existing layers")
+        for change, message in (
+            ({"name": "leg-left"}, "limbs[0].name"),
+            ({"kind": "tail"}, "limbs[0].kind"),
+            ({"joints": [[46, 45], [46, 62]]}, "limbs[0].joints"),
+            ({"outline": [[38, 43], [54, 43], [54, 99]]}, "limbs[0].outline"),
+            ({"outline": [[38, 43], [40, 45], [42, 47]]}, "positive area"),
+            ({"swing": 11}, "limbs[0].swing"),
+        ):
+            with self.subTest(change=change):
+                rig = copy.deepcopy(self.rig)
+                rig["limbs"][0].update(change)
+                self.draft.write_text(json.dumps(rig))
+                result = self.run_cli()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertEqual((self.project / "built/layers.json").read_text(), "existing layers")
+
     def test_draft_build_is_loadable_without_optional_parts_or_eye_curves(self):
         before = self.draft.read_bytes()
         sprites = self.project / "built/sprites"

@@ -108,14 +108,15 @@ avatar.impulse({ kind: 'body' }, 160, 0);                              // sway t
 avatar.impulse({ kind: 'head' }, 0, 120);                              // a small nod
 avatar.impulse({ kind: 'strand', name: 'sideL' }, 600, 0);             // flick a hair strand (rig.strands[i].name)
 avatar.impulse({ kind: 'cloth', name: 'skirt', at: 0.3 }, -400, 0);    // push the hem near 30% of its length
+avatar.impulse({ kind: 'limb', name: 'leg_left' }, 300, 0);            // swing a limb chain (rig.limbs[i].name)
 ```
 
 `toImagePoint` and its inverse `toClientPoint` follow the canvas position, border, CSS scaling, device pixel ratio, padding,
 `fit` and the optional `view.rotation`.
 `impulse` changes velocities only, never positions. Each kind of target has an upper bound and larger
 values are truncated; a fringe strand shares its push with the neighbouring fringe strands it moves with;
-without `at` the whole hem of a garment moves. Unknown targets are ignored, and `limb` targets are reserved
-for limb chains. An avatar that never receives an impulse renders exactly as before.
+without `at` the whole hem of a garment moves; a limb swings about its root. Unknown targets are ignored. An avatar
+that never receives an impulse renders exactly as before.
 
 ## Mouth movement
 

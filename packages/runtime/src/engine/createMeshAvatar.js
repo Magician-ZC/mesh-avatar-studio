@@ -14,6 +14,7 @@ import { parseExpressionSettings } from './expression-settings.ts';
 import { MOTIONS, IDLE_MOTIONS } from './motions.js';
 import { clientToImage, imageToClient } from '../interaction/coordinates.ts';
 import { createImpulse } from '../interaction/impulse.ts';
+import { createLimbs } from '../limbs/runtime.ts';
 
 const EYE_PARTS = ['ball', 'low', 'crease', 'lash'];   // back to front
 
@@ -99,9 +100,13 @@ export async function createMeshAvatarImpl(canvas, options) {
 
   // with garments the base drawing is the one without them (base.png keeps them for older runtimes)
   const baseName = CLOTH.length ? 'base_cloth' : 'base';
-  const names = [baseName, ...(rig.hand ? ['hand'] : []), ...TASSELS.map(t => t.name), ...CLOTH.map(c => `cloth_${c.name}`), ...[0, 1].flatMap(i => EYE_PARTS.map(p => `eye${i}_${p}`)), 'hairmask'];
+  // with limb chains (ER4) the base is the bare one, without the limbs (layers.json "bare"; base.png keeps them)
+  const LIMBS = rig.limbs ?? [];
+  const bareName = LIMBS.length && typeof meta.bare === 'string' ? meta.bare : null;
+  const names = [baseName, ...(bareName ? [bareName] : []), ...(rig.hand ? ['hand'] : []), ...TASSELS.map(t => t.name), ...CLOTH.map(c => `cloth_${c.name}`), ...LIMBS.map(l => `limb_${l.name}`), ...[0, 1].flatMap(i => EYE_PARTS.map(p => `eye${i}_${p}`)), 'hairmask'];
   const imgs = Object.fromEntries(await Promise.all(names.map(async n => [n, await loadImage(asset(`${n}.png`, meta.build))])));
   if (CLOTH.length) imgs.base = imgs.base_cloth;
+  if (bareName) imgs.base = imgs[bareName];
   const hairMask = channelOf(imgs.hairmask, 0);
   const hairAt = (x, y) => hairMask[Math.min(IMG.h - 1, Math.max(0, Math.round(y))) * IMG.w + Math.min(IMG.w - 1, Math.max(0, Math.round(x)))] / 255;
 
@@ -121,6 +126,16 @@ export async function createMeshAvatarImpl(canvas, options) {
     R.addLayer(n, imgs[n], mesh);
   };
   CLOTH.filter(c => c.behind).forEach(addCloth);
+  // limb chains (ER4): their own layers, skinned to their two bones; behind ones before the base, the rest after the
+  // garments and overlays
+  const limbs = createLimbs(rig, engine);
+  const addLimb = l => {
+    const n = `limb_${l.name}`;
+    const mesh = buildGrid(rects[n], rig.mesh.limbCell ?? rig.mesh.baseCell, alphaOf(imgs[n]), imgs[n].width);
+    limbs.attach(l.name, mesh);
+    R.addLayer(n, imgs[n], mesh);
+  };
+  LIMBS.filter(l => l.behind).forEach(addLimb);
 
   const baseMesh = buildGrid(rects.base, rig.mesh.baseCell, alphaOf(imgs.base), imgs.base.width, rig.mesh.fine);
   const baseW = [];
@@ -185,6 +200,8 @@ export async function createMeshAvatarImpl(canvas, options) {
     if (options.assets?.['overlays/overlays.json']) console.warn('overlay layers not loaded:', err);
   }
 
+  LIMBS.filter(l => !l.behind).forEach(addLimb);
+
   const tassels = TASSELS.map(t => {
     const mesh = buildGrid(rects[t.name], rig.mesh.tasselCell, alphaOf(imgs[t.name]), imgs[t.name].width);
     return R.addLayer(t.name, imgs[t.name], mesh);
@@ -201,13 +218,15 @@ export async function createMeshAvatarImpl(canvas, options) {
   const listeners = new Set();
   motion.onMotion = id => { for (const fn of listeners) fn(id); };
   // pointer interaction (ER1): only runs when impulse() is called
-  const applyImpulse = createImpulse(rig, { motion, physics, cloth });
+  const applyImpulse = createImpulse(rig, { motion, physics, cloth, limbs });
 
   let parameters = {}, parameterWeight = 1, parameterWeights = {}, lastParameters = {};
   const expression = new ExpressionOverlay(options.expressions === undefined ? undefined : parseExpressionSettings(options.expressions));
   const tmp = [0, 0];
   function updateParameters(dt) {
     const P = { ...motion.update(dt) };
+    // limbs without parameters sway a little while idling (not in manual mode; the sway gain scales it)
+    limbs?.idle(P, motion.t, motion.mode === 'manual' ? 0 : physics.gain);
     for (const [key, value] of Object.entries(parameters)) {
       const weight = parameterWeight * (parameterWeights[key] ?? 1);
       P[key] = weight === 1 ? value : (P[key] ?? 0) + (value - (P[key] ?? 0)) * weight;
@@ -268,6 +287,7 @@ export async function createMeshAvatarImpl(canvas, options) {
     }
     physics.chains.forEach((ch, k) => deformTassel(ch, tassels[k].mesh));
     if (CLOTH.length) { cloth.step(P, dt, phys); cloth.deform(); }
+    if (limbs) { limbs.step(dt); limbs.deform(P, phys); }
 
     const ball = rig.view.irisTravel ?? 7; // px of iris travel; rig.view.irisTravel scales it for large eyes
     R.draw({
@@ -340,7 +360,7 @@ export async function createMeshAvatarImpl(canvas, options) {
     toImagePoint(clientX, clientY) { return destroyed ? null : clientToImage(canvas, R, clientX, clientY); },
     /** Source image px -> viewport px (the inverse of toImagePoint, following view.rotation); null before the first frame. */
     toClientPoint(x, y) { return destroyed ? null : imageToClient(canvas, R, x, y); },
-    /** Instantaneous velocity (source px/s) for the body, head, a strand or a garment; unknown targets are ignored. */
+    /** Instantaneous velocity (source px/s) for the body, head, a strand, a garment or a limb; unknown targets are ignored. */
     impulse(target, vx, vy) { if (!destroyed) applyImpulse(target, vx, vy); },
     /** Advance the simulation by `sec` and draw (for tests / hidden tabs). */
     advance(sec, fps = 60) {

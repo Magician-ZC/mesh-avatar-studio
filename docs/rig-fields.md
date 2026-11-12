@@ -315,6 +315,38 @@ is present. Inspect sleeves, elbows, wrists and skirt edges in every frame. Redu
 `swing`, `bend` or `inward` if the hand enters clothing; segmentation remnants in
 cut-out cloth must be corrected in the artwork rather than by increasing motion.
 
+## Optional limb chains
+
+Experimental feature for poses that the hanging `arms` and planted `legs` do not cover (sitting, kneeling, squatting,
+a raised hand); WebGL runtime only. Omit `limbs` to retain the existing output exactly. Each entry is a two-bone chain cut
+into its own layer `limb_<name>`; the layer builder also writes `base_bare.png`, the base without the limbs (named by
+`bare` in `layers.json`), and `base.png` keeps them for older runtimes. A standing figure keeps using `arms` and `legs`;
+the same limb must not be bound in both places.
+
+| Field | Meaning |
+| --- | --- |
+| `limbs[*].name` | Unique name of letters, digits and underscores; the layer is `limb_<name>`. |
+| `limbs[*].kind` | `arm`, `leg` or `prop`. |
+| `limbs[*].joints` | Root, middle and end joint `[x,y]`, px, inside the image, at least 1 px apart; the bones must not fold back onto each other. The root sits where the limb leaves the body. |
+| `limbs[*].outline` | Cut-out polygon of the limb, at least three points inside the image with a positive area. Everything inside it that is not transparent goes into the limb layer. |
+| `limbs[*].behind` | Optional boolean, default `false`; draw before the bare base instead of after the garments and overlays. |
+| `limbs[*].swing` | Optional swing limit about the root in degrees, `0..10`, default `4`. |
+| `limbs[*].bend` | Optional bend limit at the middle joint in degrees, `0..12`, default `6`. |
+| `mesh.limbCell` | Optional integer limb mesh spacing, px; defaults to `baseCell`. |
+
+Parameters `limb:<name>:swing` and `limb:<name>:bend` run from `-1` to `1` (times the limits), default `0`. Positive swing
+turns the limb clockwise on the image about its root; positive bend increases the bend the limb is drawn with (clockwise
+for a straight limb). The root joint follows the base drawing at that point (its position and the drawing's own turn
+there) and the limb's own motion fades in over the first 35% of the first bone, so the cut where the limb meets the body
+moves exactly like the base. The two bones blend across the middle joint along the bisector of their directions, never
+by image height. While idling, a limb whose parameters are not set sways slowly by up to 30% of its swing and 20% of its
+bend limit (scaled by the sway gain, off in manual mode). `impulse({ kind: 'limb', name })` swings a limb; its spring
+settles within about 3 s. Under each limb the bare base continues only the visible pixels next to it, within a band as
+wide as the limb can move at its limits, and stays transparent where the limb hangs over the background.
+
+`render-poses` adds `limb-<name>-swing-max`, `-swing-min`, `-bend-max`, `-bend-min` and `-both-max` for every limb and
+keeps the limb parameters at `0` in the other poses.
+
 ## Optional hit zones
 
 Use `hitZones` to name regions that an application can recognise under the pointer, for example a

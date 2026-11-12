@@ -64,8 +64,8 @@ export interface MeshAvatar {
   toClientPoint(x: number, y: number): [number, number] | null;
   /**
    * Give a part an instantaneous velocity in source pixels per second; its springs or pendulums then let it settle.
-   * Each kind of target has an upper bound, and larger values are truncated. Unknown targets are ignored, and `limb`
-   * targets are reserved for limb chains. For `cloth`, `at` (0–1 along the hem) pushes the nearest columns; without
+   * Each kind of target has an upper bound, and larger values are truncated. Unknown targets are ignored; a `limb`
+   * target swings that limb chain about its root. For `cloth`, `at` (0–1 along the hem) pushes the nearest columns; without
    * it the whole hem moves. WebGL runtime only.
    */
   impulse(target: ImpulseTarget, vx: number, vy: number): void;

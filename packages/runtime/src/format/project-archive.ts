@@ -20,6 +20,11 @@ export async function packProjectAvatar(
   checkEntryName(source); checkEntryName(thumbnail);
   wanted.add('built/base.png'); wanted.add('built/hairmask.png'); wanted.add(thumbnail);
   if (json('rig.json').cloth?.length) wanted.add('built/base_cloth.png');
+  const bare = metadata['built/layers.json'] ? json('built/layers.json')?.bare : undefined;
+  if (bare !== undefined) {
+    if (typeof bare !== 'string' || !/^[A-Za-z0-9_-]+$/.test(bare)) throw new Error('built/layers.json.bare: invalid layer name');
+    wanted.add(`built/${bare}.png`);
+  }
   if (includeSource) wanted.add(source);
   for (const [path, prefix] of [['built/layers.json', 'built/'], ['built/sprites/sprites.json', 'built/sprites/']]) {
     if (!metadata[path]) continue;

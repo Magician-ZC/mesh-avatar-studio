@@ -7,7 +7,7 @@
 //   strand  the node velocities of one hair strand, growing from root to tip (physics.js); a fringe strand shares it
 //           with its neighbours in the fringe sheet
 //   cloth   the angular velocity of the garment columns nearest `at` along the hem, falling off as a cosine (cloth.js)
-//   limb    reserved for the limb chains of ER4; ignored until then
+//   limb    the swing velocity of a limb chain (ER4, ../limbs/runtime.ts) from the push's part across the limb
 //
 // Unknown targets and non-finite vectors are ignored. Bounds are in ./limits.ts.
 import type { Point, Rig } from '../rig/types';
@@ -25,6 +25,8 @@ export interface StrandChain { v: number[][] }
 export interface StrandChains { strands: StrandChain[]; fringe?: number }
 /** The cloth simulator's interaction entry (`Cloth.impulse`, cloth.js); false when nothing was pushed. */
 export interface ClothSimulator { impulse(name: string, at: number | undefined, vx: number, vy: number): boolean }
+/** The limb chains' interaction entry (ER4, ../limbs/runtime.ts); false for an unknown limb. */
+export interface LimbSimulator { impulse(name: string, vx: number, vy: number): boolean }
 
 /** The fields of a cloth.js garment that the impulse reads and writes. */
 export interface GarmentState {
@@ -190,7 +192,7 @@ export function clothImpulse(g: GarmentState, at: number | undefined, vx: number
 }
 
 /** The `impulse` method of a mesh avatar: dispatches to the motion springs, the hair physics and the cloth. */
-export function createImpulse(rig: Rig, parts: { motion: ParameterSprings; physics: StrandChains; cloth: ClothSimulator }) {
+export function createImpulse(rig: Rig, parts: { motion: ParameterSprings; physics: StrandChains; cloth: ClothSimulator; limbs?: LimbSimulator | null }) {
   const strands = new Map<string, number[]>();
   (rig.strands ?? []).forEach((strand, i) => strands.set(strand.name, [...(strands.get(strand.name) ?? []), i]));
   const chains = parts.physics.strands;
@@ -216,7 +218,7 @@ export function createImpulse(rig: Rig, parts: { motion: ParameterSprings; physi
     } else if (target.kind === 'cloth' && typeof target.name === 'string') {
       const at = typeof target.at === 'number' && Number.isFinite(target.at) ? target.at : undefined;
       parts.cloth.impulse(target.name, at, x, y);
-    }
-    // 'limb' targets wait for the limb chains of ER4; other kinds are not targets
+    } else if (target.kind === 'limb' && typeof target.name === 'string') parts.limbs?.impulse(target.name, x, y);
+    // other kinds are not targets
   };
 }

@@ -1,4 +1,5 @@
 import { clothGrid } from '../engine/cloth-grid.js';
+import { limbErrors } from '../limbs/validate.ts';
 import type { Rig } from './types';
 
 type Check = (value: unknown, path: string, errors: string[]) => void;
@@ -92,14 +93,18 @@ const schema = (draft: boolean) => object({
   mesh: object({ baseCell: integer, fine: object({ x0: wholeNumber, x1: wholeNumber,
     y0: wholeNumber, y1: wholeNumber, cell: integer }), handCell: integer,
     tasselCell: integer, eyeBallCell: integer, eyeCell: integer, spriteCell: integer,
-    clothCell: integer }, ['clothCell']),
+    clothCell: integer, limbCell: integer }, ['clothCell', 'limbCell']),
   view: object({ padTop: number, padSide: number, gazeCenter: point, irisTravel: positive, rotation: number }, ['gazeCenter', 'irisTravel', 'rotation']),
   physics: object({ gravity: number }, ['gravity']),
+  limbs: array(object({ name: string, outline: polygon, joints: array(point, 3, 3), swing: nonnegative, bend: nonnegative,
+    kind: (v, p, e) => { if (v !== 'arm' && v !== 'leg' && v !== 'prop') e.push(`${p}: expected "arm", "leg" or "prop"`); },
+    behind: (v, p, e) => { if (typeof v !== 'boolean') e.push(`${p}: expected a boolean`); },
+  }, ['swing', 'bend', 'behind'])),
   hitZones: array(object({ name: string, outline: polygon,
     side: (v, p, e) => { if (v !== 'left' && v !== 'right') e.push(`${p}: expected "left" or "right"`); },
     target: object({ kind: (v, p, e) => { if (v !== 'strand' && v !== 'cloth' && v !== 'limb') e.push(`${p}: expected "strand", "cloth" or "limb"`); }, name: string }),
   }, ['side', 'target'])),
-}, ['buns', 'strands', 'accessories', 'hand', 'cloth', 'legs', 'arms', 'hitZones', 'physics']);
+}, ['buns', 'strands', 'accessories', 'hand', 'cloth', 'legs', 'arms', 'limbs', 'hitZones', 'physics']);
 
 export function validateRig(value: unknown, options: { draft?: boolean } = {}): string[] {
   const errors: string[] = [];
@@ -183,6 +188,7 @@ export function validateRig(value: unknown, options: { draft?: boolean } = {}): 
     }
     clothNames.add(cloth.name);
   }
+  errors.push(...limbErrors(rig));
   const zoneNames = new Set<string>();
   for (const [i, zone] of (rig.hitZones ?? []).entries()) {
     const path = `rig.hitZones[${i}]`;

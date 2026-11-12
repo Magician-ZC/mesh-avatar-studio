@@ -14,7 +14,15 @@ export const IMPULSE_LIMITS = Object.freeze({
   strand: 1600,
   /** Garment hem speed in source px/s. */
   cloth: 900,
+  /** Limb end speed in source px/s (ER4); its part across the limb turns the limb about its root. */
+  limb: 1200,
 });
+
+/**
+ * A limb's swing parameter (-1..1, times the limb's swing limit) changes at most this much per second from an impulse,
+ * so a capped push swings a limb up to about its limit and its spring brings it back within about 3 s.
+ */
+export const LIMB_SWING_RATE = 8;
 
 /**
  * A garment column swings at most this many times its rendered limit angle per second (the angle at which its `max`

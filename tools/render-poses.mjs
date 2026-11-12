@@ -38,6 +38,12 @@ async function main() {
       ['arms-body-left', { bodyAngleZ: -8, weightShift: -0.6, armSwingL: -1, armSwingR: 1, elbowBendL: 0.5, elbowBendR: 0.5 }],
       ['arms-body-right', { bodyAngleZ: 8, weightShift: 0.6, armSwingL: 1, armSwingR: -1, elbowBendL: 0.5, elbowBendR: 0.5 }],
     ] : []),
+    // limb chains (ER4): each limb at its swing and bend limits, and both together
+    ...(rig.limbs ?? []).flatMap(({ name }) => [
+      [`limb-${name}-swing-max`, { [`limb:${name}:swing`]: 1 }], [`limb-${name}-swing-min`, { [`limb:${name}:swing`]: -1 }],
+      [`limb-${name}-bend-max`, { [`limb:${name}:bend`]: 1 }], [`limb-${name}-bend-min`, { [`limb:${name}:bend`]: -1 }],
+      [`limb-${name}-both-max`, { [`limb:${name}:swing`]: 1, [`limb:${name}:bend`]: 1 }],
+    ]),
   ];
   const errors = validateRig(rig);
   if (errors.length) throw new Error(errors.join('\n'));
@@ -51,7 +57,8 @@ async function main() {
   }
   await asset('layers.json');
   const layers = JSON.parse(await readFile(resolve(built, 'layers.json'), 'utf8'));
-  await Promise.all(['base', 'hairmask', ...(rig.cloth?.length ? ['base_cloth'] : []), ...Object.keys(layers.layers)].map(name => asset(`${name}.png`)));
+  await Promise.all(['base', 'hairmask', ...(rig.cloth?.length ? ['base_cloth'] : []), ...(rig.limbs?.length && layers.bare ? [layers.bare] : []),
+    ...Object.keys(layers.layers)].map(name => asset(`${name}.png`)));
   try {
     await asset('sprites/sprites.json');
   } catch (error) {
@@ -88,7 +95,9 @@ async function main() {
       const canvas = document.getElementById('avatar');
       const width = Math.ceil(rig.image.width * 1.2), height = Math.ceil(rig.image.height * 1.1);
       canvas.style.width = `${width}px`; canvas.style.height = `${height}px`;
-      const defaults = Object.fromEntries(PARAMS.map(p => [p.id, p.def]));
+      // limb parameters default to 0 like the others, so the review shows no idle sway (ER4)
+      const defaults = Object.fromEntries([...PARAMS.map(p => [p.id, p.def]),
+        ...(rig.limbs ?? []).flatMap(({ name }) => [[`limb:${name}:swing`, 0], [`limb:${name}:bend`, 0]])]);
       const pictures = [];
       async function avatar() {
         const av = await createMeshAvatar(canvas, { rig, assets, manual: true, padTop: 0.1, padSide: 0.1 });

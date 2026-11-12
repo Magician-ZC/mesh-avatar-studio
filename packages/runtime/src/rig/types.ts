@@ -98,6 +98,27 @@ export interface HitZone {
   side?: 'left' | 'right';
   target?: { kind: 'strand' | 'cloth' | 'limb'; name: string };
 }
+/**
+ * Optional generic limb chain (WebGL runtime only): a separately cut arm, leg or prop with two bones, for poses that the
+ * hanging `arms` and planted `legs` do not cover. Its root follows the base drawing; the parameters
+ * `limb:<name>:swing` and `limb:<name>:bend` (-1..1, default 0) turn the chain about the root and bend it at the middle
+ * joint. Angles are degrees.
+ */
+export interface Limb {
+  /** Letters, digits and underscores; unique. The layer is `limb_<name>`. */
+  name: string;
+  kind: 'arm' | 'leg' | 'prop';
+  /** Root, middle and end joint, source pixels. */
+  joints: [Point, Point, Point];
+  /** Cut-out polygon of the limb, source pixels. */
+  outline: Point[];
+  /** Draw before the base drawing instead of in front of it. */
+  behind?: boolean;
+  /** Swing limit about the root in degrees, 0..10, default 4. */
+  swing?: number;
+  /** Bend limit at the middle joint in degrees, 0..12, default 6. */
+  bend?: number;
+}
 export interface Leg { hip: Point; knee: Point; ankle: Point }
 /** Optional planted-foot weight transfer. Left/right refer to the image. */
 export interface Legs {
@@ -143,12 +164,15 @@ export interface Rig {
   cloth?: Cloth[];
   legs?: Legs;
   arms?: Arms;
+  limbs?: Limb[];
   hitZones?: HitZone[];
   mesh: {
     baseCell: number;
     fine: { x0: number; x1: number; y0: number; y1: number; cell: number };
     handCell: number; tasselCell: number; eyeBallCell: number;
     eyeCell: number; spriteCell: number; clothCell?: number;
+    /** Optional limb mesh spacing, px; defaults to `baseCell`. */
+    limbCell?: number;
   };
   view: {
     padTop: number; padSide: number; gazeCenter?: Point; irisTravel?: number;

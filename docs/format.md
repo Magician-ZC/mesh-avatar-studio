@@ -15,6 +15,8 @@ built/
   base.png                     image with movable parts removed and inpainted
   base_cloth.png               required only for nonempty rig.cloth; base without garments
   cloth_<name>.png              garment cutout for each rig.cloth entry
+  base_bare.png                required only for nonempty rig.limbs; the runtime base without the limbs
+  limb_<name>.png              limb cutout for each rig.limbs entry
   hairmask.png                 full-size hair mask, read from the red channel
   <name>.png                   one image for every entry in layers.json.layers
   sprites/                     optional drawn eye and mouth variants
@@ -128,6 +130,7 @@ when they are invalid. It ignores unknown keys, including those inside `studio`.
 | `build` | Non-empty cache-busting hash of build inputs. It is not a format version. |
 | `layers` | Object mapping each layer name to `[x, y, width, height]`. |
 | `eyes` | Two objects containing `x0`, `x1`, `top` and `bot`, in the same eye order as the rig. |
+| `bare` | Optional. Name of the full-size base without the limb chains (`base_bare`); required when `rig.limbs` is nonempty. Runtimes that know limbs draw it instead of `base` (or `base_cloth`) and the `limb_<name>` layers over or under it; older runtimes ignore it and draw `base`, which keeps the limbs. |
 
 Rectangle origins are non-negative integers; width and height are positive integers.
 Rectangles lie inside the source image. Each corresponding PNG is cropped to its
@@ -143,6 +146,7 @@ no extension or path separator.
 | `eye0_low`, `eye1_low` | Lower eyelid strokes. |
 | `eye0_crease`, `eye1_crease` | Eyelid crease strokes. A transparent image is valid when no crease is drawn. |
 | `eye0_lash`, `eye1_lash` | Upper lash strokes. |
+| `limb_<name>` | The cutout of `rig.limbs` entry `<name>`: the source pixels inside its outline, alpha included. Required for every limb. |
 | `eye0_open`, `eye1_open` | Optional. The original pixels around the eye with a hole for the eye ball (`build-layers.py --open-eyes`). While the eye is fully open, runtimes that know them draw them over the eye layers, so the open eye shows exactly the illustration; they fade out as the lids start to move or a drawn eye sprite covers the eye, and deform like the base. Without them, or in older runtimes, the eye layers alone are drawn. |
 
 All four parts are required for each eye. Accessory names come from
