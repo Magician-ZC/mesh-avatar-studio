@@ -3,6 +3,11 @@
 
 Run with: uv run --with numpy --with pillow --with opencv-python-headless
           tools/build-layers.py <project-dir> [--rig rig.draft.json]
+          [--hairmask mask.png] [--cloth-under keep]
+
+--hairmask takes the hair mask from a file (white is hair, exactly the size of source.png) instead of
+clustering hair colours. --cloth-under keep makes base_cloth.png the base with the garments kept: nothing
+is redrawn or inpainted under them and source_under.png is not read. Without them the output is unchanged.
 """
 
 import argparse
@@ -242,8 +247,12 @@ def ellipse_mask(shape, region):
     ) ** 2 <= 1
 
 
-def hair_mask(rgba, rig):
-    """Grow sampled hair colours over the head and buns, excluding skin and clothes."""
+def hair_mask(rgba, rig, external=None):
+    """Grow sampled hair colours over the head and buns, excluding skin and clothes.
+
+    With `external` (an 8-bit mask of the hair, same size as the source, from --hairmask) that mask replaces
+    the colour clustering; it gets the same blur and keeps the eyes, brow, mouth, nose, hand and garments out.
+    """
     shape = rgba.shape[:2]
     sample = np.zeros(shape, np.uint8)
     scope = ellipse_mask(shape, rig["head"]).astype(np.uint8) * 255
@@ -267,6 +276,12 @@ def hair_mask(rgba, rig):
         excluded |= polygon_mask(shape, rig["hand"]["outline"]) > 0
     for cloth in rig.get("cloth", []):
         excluded |= polygon_mask(shape, cloth["outline"]) > 0
+    if external is not None:
+        mask = external.copy()
+        mask[excluded | (rgba[..., 3] == 0)] = 0
+        mask = cv2.GaussianBlur(mask, (0, 0), blur)
+        mask[excluded | (rgba[..., 3] == 0)] = 0
+        return mask
     opaque = rgba[..., 3] > 200
     lab = cv2.cvtColor(rgba[..., :3], cv2.COLOR_RGB2LAB).astype(np.float32)
     sampling = (sample > 0) & opaque & ~excluded
@@ -392,7 +407,7 @@ def hand_prefill(rgba, remove, hand):
     return prefill, painted
 
 
-def build_cloth(project, rig, rgba, base, store, images):
+def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto"):
     """Cut each garment into its own layer and write base_cloth.png without them.
 
     base.png keeps the garments, so runtimes that do not know rig.cloth still draw them.
@@ -400,12 +415,14 @@ def build_cloth(project, rig, rgba, base, store, images):
     garments) it also takes the edge pixels just outside the approximate outline that
     are background in the under drawing, or differ strongly from it; base_cloth takes
     the under drawing wherever the two differ. Without it, the outline area is inpainted.
+    With cloth_under="keep", base_cloth is the base with the garments kept: nothing is
+    drawn or inpainted under them and source_under.png is never read.
     """
     h, w = rgba.shape[:2]
     shape = (h, w)
     under = None
     under_path = project / "source_under.png"
-    if under_path.exists():
+    if cloth_under != "keep" and under_path.exists():
         with Image.open(under_path) as image:
             under = np.array(image.convert("RGBA"))
         if under.shape != rgba.shape:
@@ -436,7 +453,9 @@ def build_cloth(project, rig, rgba, base, store, images):
             mask &= ~front
         taken |= mask
         store(f"cloth_{cloth['name']}", *crop_layer(rgba, mask))
-    if under is not None:
+    if cloth_under == "keep":
+        bare = base.copy()
+    elif under is not None:
         bare = base.copy()
         replace = (diff > 0) | (cv2.dilate(taken, np.ones((3, 3), np.uint8)) > 0)
         bare[replace] = under[replace]
@@ -572,7 +591,18 @@ def validate_inputs(rig, rgba):
         points(cloth["hem"], f"cloth[{i}].hem", 2)
 
 
-def build(project, rig_path):
+def read_hairmask(path, size):
+    """An external hair mask: grayscale (or RGB) PNG, white where hair is, exactly the source size."""
+    with Image.open(path) as image:
+        if image.size != size:
+            raise ValueError(
+                f"--hairmask {path.name} is {image.size[0]} x {image.size[1]}, "
+                f"source.png is {size[0]} x {size[1]}"
+            )
+        return np.array(image.convert("L"))
+
+
+def build(project, rig_path, hairmask=None, cloth_under="auto"):
     source = project / "source.png"
     rig_bytes = rig_path.read_bytes()
     rig = json.loads(rig_bytes)
@@ -581,8 +611,15 @@ def build(project, rig_path):
     validate_inputs(rig, rgba)
     rgba[..., 3] = np.where(rgba[..., 3] > 240, 255, rgba[..., 3])
     h, w = rgba.shape[:2]
+    external_hair = read_hairmask(hairmask, (w, h)) if hairmask is not None else None
+    # Options take part in the cache-busting hash only when given, so a plain build keeps its id.
+    options = b""
+    if hairmask is not None:
+        options += b"hairmask:" + hairmask.read_bytes()
+    if cloth_under != "auto":
+        options += f"cloth-under:{cloth_under}".encode()
     build_id = hashlib.sha256(
-        source.read_bytes() + rig_bytes + Path(__file__).read_bytes()
+        source.read_bytes() + rig_bytes + Path(__file__).read_bytes() + options
     ).hexdigest()[:12]
     meta = {"size": [w, h], "build": build_id, "layers": {}}
     images = {}
@@ -661,9 +698,9 @@ def build(project, rig_path):
             accessory_bg > 0, (base[..., 3] * fade).astype(np.uint8), base[..., 3]
         )
     images["base"] = base
-    images["hairmask"] = hair_mask(rgba, rig)
+    images["hairmask"] = hair_mask(rgba, rig, external_hair)
     if rig.get("cloth"):
-        build_cloth(project, rig, rgba, base, store, images)
+        build_cloth(project, rig, rgba, base, store, images, cloth_under)
 
     # Calculate everything before replacing files. Keep sprites and unrelated
     # assets intact; only filenames in this build's manifest are consumed.
@@ -698,9 +735,21 @@ def main():
         default="rig.json",
         help="Rig filename relative to project-dir (default: rig.json)",
     )
+    parser.add_argument(
+        "--hairmask",
+        type=Path,
+        help="Hair mask PNG (white is hair, same size as source.png) used instead of colour clustering",
+    )
+    parser.add_argument(
+        "--cloth-under",
+        choices=("auto", "keep"),
+        default="auto",
+        help="keep: base_cloth.png keeps the garments, without inpainting or source_under.png "
+        "(default auto: source_under.png if present, else inpaint)",
+    )
     args = parser.parse_args()
     try:
-        build(args.project_dir, args.project_dir / args.rig)
+        build(args.project_dir, args.project_dir / args.rig, args.hairmask, args.cloth_under)
     except (OSError, ValueError, KeyError, TypeError, cv2.error) as error:
         print(f"build-layers: {error}", file=sys.stderr)
         return 1

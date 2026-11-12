@@ -41,13 +41,79 @@ class BuildLayersTest(unittest.TestCase):
         self.draft = self.project / "rig.draft.json"
         self.draft.write_text(json.dumps(self.rig))
 
-    def run_cli(self):
+    def run_cli(self, *options):
         return subprocess.run(
-            [sys.executable, str(SCRIPT), str(self.project), "--rig", "rig.draft.json"],
+            [sys.executable, str(SCRIPT), str(self.project), "--rig", "rig.draft.json", *options],
             capture_output=True,
             text=True,
             check=False,
         )
+
+    def add_skirt(self):
+        self.rig["cloth"] = [{
+            "name": "skirt", "outline": [[20, 45], [80, 45], [80, 70], [20, 70]],
+            "waist": [[30, 45], [70, 45]], "hem": [[20, 70], [80, 70]],
+        }]
+        self.draft.write_text(json.dumps(self.rig))
+        with Image.open(self.project / "source.png") as source:
+            full = source.convert("RGBA")
+        ImageDraw.Draw(full).rectangle((20, 45, 80, 70), fill=(255, 80, 150, 255))
+        full.save(self.project / "source.png")
+        return full
+
+    def test_cloth_under_keep_keeps_the_garments_and_never_reads_source_under(self):
+        self.add_skirt()
+        # An unreadable source_under.png proves the option never opens it.
+        (self.project / "source_under.png").write_bytes(b"not a png")
+        result = self.run_cli("--cloth-under", "keep")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with Image.open(self.project / "built/base.png") as base, Image.open(self.project / "built/base_cloth.png") as bare:
+            self.assertEqual(np.array(bare).tobytes(), np.array(base).tobytes())
+            self.assertEqual(bare.getpixel((50, 60)), (255, 80, 150, 255))
+        meta = json.loads((self.project / "built/layers.json").read_text())
+        self.assertIn("cloth_skirt", meta["layers"])
+        # Without the option the same project still reads source_under.png (and fails on this one).
+        self.assertNotEqual(self.run_cli().returncode, 0)
+
+    def test_hairmask_replaces_colour_clustering(self):
+        mask = Image.new("L", (100, 80), 0)
+        ImageDraw.Draw(mask).rectangle((0, 0, 99, 18), fill=255)  # hair across the top
+        ImageDraw.Draw(mask).rectangle((10, 20, 40, 45), fill=255)  # and over the left eye
+        mask.save(self.project / "hair.png")
+        result = self.run_cli("--hairmask", str(self.project / "hair.png"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with Image.open(self.project / "built/hairmask.png") as image:
+            hair = np.array(image)
+        self.assertGreater(int(hair[5, 50]), 128)  # inside the given hair
+        self.assertEqual(int(hair[30, 22]), 0)  # the eye region stays out
+        self.assertEqual(int(hair[70, 50]), 0)  # far from it
+        plain = self.run_cli()
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        with Image.open(self.project / "built/hairmask.png") as image:
+            self.assertEqual(image.getextrema(), (0, 0))  # colour clustering finds no hair here
+
+    def test_hairmask_must_match_the_source_size(self):
+        (self.project / "rig.json").write_text("existing rig")
+        (self.project / "built").mkdir()
+        (self.project / "built/layers.json").write_text("existing layers")
+        Image.new("L", (99, 80), 255).save(self.project / "hair.png")
+        result = self.run_cli("--hairmask", str(self.project / "hair.png"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--hairmask", result.stderr)
+        self.assertEqual((self.project / "rig.json").read_text(), "existing rig")
+        self.assertEqual((self.project / "built/layers.json").read_text(), "existing layers")
+
+    def test_options_change_the_build_id_only_when_given(self):
+        self.add_skirt()
+
+        def build_id(*options):
+            result = self.run_cli(*options)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads((self.project / "built/layers.json").read_text())["build"]
+
+        plain = build_id()
+        self.assertEqual(build_id("--cloth-under", "auto"), plain)
+        self.assertNotEqual(build_id("--cloth-under", "keep"), plain)
 
     def test_cloth_layers_keep_legacy_base_and_generate_bare_base(self):
         self.rig['cloth'] = [{
