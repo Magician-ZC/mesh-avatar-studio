@@ -8,6 +8,8 @@ export interface Eye {
   x1: number;
   top: number[];
   bot: number[];
+  /** Optional: the iris outline, also where the lids cover it. With it the build cuts iris layers for this eye. */
+  iris?: Ellipse;
 }
 export interface Strand {
   name: string;

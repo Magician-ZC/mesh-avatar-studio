@@ -143,6 +143,8 @@ no extension or path separator.
 | `hairmask` | Full-size mask whose red channel controls hair deformation. |
 | `hand` | The movable hand and arm cutout; present when `rig.hand` exists. |
 | `eye0_ball`, `eye1_ball` | Eye white and iris, clipped by the eyelid curves at runtime. |
+| `eye0_white`, `eye1_white` | Optional, only together with the eye's `_iris` layer (an eye with `iris` in the rig). The eye ball with the iris painted out: the eye white carried on across it, shaded near the lids like the white beside it, and carried on 5 px beyond the opening as it is at the opening's edge. |
+| `eye0_iris`, `eye1_iris` | Optional, only together with the eye's `_white` layer. The iris as a sprite: the iris with as much of the white around it as it takes to reach plain eye white (its dark ring and any rim light belong to it), continued under the lids from its own rings. Runtimes that know the pair draw an eye from them instead of from its `_ball`: the white stays where it is and the iris moves by the gaze as it is, both clipped by the eyelid curves (1 px beyond them, 3 px while an open-eye layer covers the eye). The `_ball` layer is still required, for older runtimes. For such an eye the other layers change with the pair: `_low`, `_crease` and `_lash` are empty where the eye layers draw fully, and the `_open` layer has its hole exactly there, holding inside it only the lids' share of the pixels a lid blends into (the lid's colour at that opacity). White, iris and open-eye layer over each other are the picture; runtimes that know the pair do not draw the three line layers while the open-eye layer is fully shown. |
 | `eye0_low`, `eye1_low` | Lower eyelid strokes. |
 | `eye0_crease`, `eye1_crease` | Eyelid crease strokes. A transparent image is valid when no crease is drawn. |
 | `eye0_lash`, `eye1_lash` | Upper lash strokes. |
@@ -152,7 +154,7 @@ no extension or path separator.
 | `hair_front`, `face_skin` | Optional, only with `face_field`. `hair_front` is the hair in front of the face as its own layer, drawn above the eyes and the drawn eye and mouth variants: it sways and rolls with the head but does not slide with a turn. `face_skin` is what lies under that hair: it moves with the face, covers the base's own copy of the hair, and is what shows beside the hair when the face slides. With `--head-plate` the hair is lifted off a clean plate (the same picture without that hair): the hair layer over `face_skin` over `base.png` is the source again, and `face_skin` is the plate's forehead, brows and eyes. With `--head-layers` (no plate) the hair is told apart by colour and `face_skin` is skin continued from the face. `base.png` is the same with or without them. |
 | `eye0_open_under`, `eye1_open_under` | Optional (`--head-plate` with `--open-eyes`). The open-eye layers of the face without the lifted hair. Under a `hair_front` layer the runtime draws these instead of `eye0_open` / `eye1_open`, which still carry the hair for older runtimes. |
 
-All four parts are required for each eye. Accessory names come from
+All four parts (`_ball`, `_low`, `_crease`, `_lash`) are required for each eye. Accessory names come from
 `rig.accessories[*].name`; each needs a rectangle and a corresponding PNG.
 Accessory names must be unique and must not reuse reserved layer names.
 
@@ -161,6 +163,13 @@ coordinates sampled across that span; every top value is at or above its bottom 
 These fields duplicate `rig.eyes[*].x0`, `x1`, `top` and `bot`. The layer builder writes
 both copies, and their values must agree exactly. A future format may keep them only
 in `layers.json`; version 1 requires both.
+
+When iris layers were cut, the optional `iris` holds one entry per eye: `null` for an eye
+without them, otherwise what the builder measured: `margin` (px of eye white the sprite
+carries beyond the iris outline), `white` (px of eye white the iris was painted out from),
+`seen` and `continued` (px of the sprite taken from the picture and made up under the lids)
+and `rest` (`mean` and `p99` difference, in grey levels, between the two layers over each
+other and the picture where the runtime draws them fully). Runtimes do not read it.
 
 ## Drawn variants: `built/sprites/sprites.json`
 

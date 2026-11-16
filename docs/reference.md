@@ -48,7 +48,12 @@ explain coordinates and placement.
    `built/base.png`, `built/hairmask.png`, the four `eye{i}_ball/lash/low/crease.png` layers per
    eye, and `built/layers.json`. Hand and accessory layers are generated only when present
    in the rig. With `--open-eyes` it also writes `eye{i}_open.png`, the original pixels around
-   each eye that the runtime shows while the eye is fully open. With head layers a head turn slides the
+   each eye that the runtime shows while the eye is fully open. For an eye with `iris` in the rig it
+   also writes `eye{i}_white.png` and `eye{i}_iris.png`: the eye white with the iris painted out and
+   the iris as a sprite, which the runtime moves with the gaze instead of warping the eye ball (the
+   reason is printed, and the eye is cut as before, when the picture has no eye white beside the iris
+   or hardly shows it; `layers.json` records how well the two give the picture back, `iris`).
+   With head layers a head turn slides the
    face under the hair instead of bulging the whole head (`face_field.png`, `hair_front.png`,
    `face_skin.png`; see [format.md](format.md)). `--head-plate plate.png --head-footprint mask.png` lifts
    the hair off a clean plate: the same picture, pixel aligned, without the hair in front of the face

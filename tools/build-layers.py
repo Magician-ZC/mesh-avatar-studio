@@ -20,6 +20,12 @@ hair is then lifted off the plate exactly, the eye layers are cut from the face 
 eye0_open_under.png / eye1_open_under.png are the open-eye layers of that face (with --open-eyes).
 Without these options the output is unchanged.
 
+An eye with `iris` in the rig (the iris outline as an ellipse) also gets eye{i}_white.png and eye{i}_iris.png (see
+tools/eye/iris.py): the eye white with the iris painted out, and the iris as a sprite, which runtimes that know them
+move with the gaze instead of warping the eye ball (older runtimes ignore them and use eye{i}_ball.png, which is still
+written). The open-eye layer of such an eye has a hole as large as everything the eye layers draw, so no part of the
+iris stays in it. When the picture does not allow it the reason is printed and that eye is cut as before.
+
 A rig with `limbs` (generic limb chains) also gets limb_<name>.png for every limb and base_bare.png, the base without
 them, named by "bare" in layers.json (see tools/limbs/layers.py); base.png keeps the limbs for older runtimes.
 """
@@ -54,8 +60,26 @@ LIMB_LAYERS = Path(__file__).resolve().parent / "limbs" / "layers.py"
 _limb_layers = None
 HEAD_LAYERS = Path(__file__).resolve().parent / "head" / "layers.py"
 HEAD_PLATE = Path(__file__).resolve().parent / "head" / "plate.py"
+IRIS_LAYERS = Path(__file__).resolve().parent / "eye" / "iris.py"
 _head_layers = None
 _head_plate = None
+_iris_layers = None
+
+
+def iris_layers():
+    """tools/eye/iris.py, loaded from this folder without writing bytecode (only eyes with `iris` need it)."""
+    global _iris_layers
+    if _iris_layers is None:
+        spec = importlib.util.spec_from_file_location("mesh_avatar_iris_layers", IRIS_LAYERS)
+        module = importlib.util.module_from_spec(spec)
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        _iris_layers = module
+    return _iris_layers
 
 
 def head_plate():
@@ -583,6 +607,16 @@ def validate_inputs(rig, rgba):
         if not np.any((core > 0) & (rgba[..., 3] > 0)):
             raise ValueError(f"eyes[{i}].opening has no source pixels")
         eye_curves(eye)
+        if eye.get("iris") is not None:
+            iris = eye["iris"]
+            if (
+                not isinstance(iris, dict)
+                or not all(isinstance(iris.get(k), (int, float)) and math.isfinite(iris[k]) for k in ("cx", "cy", "rx", "ry"))
+                or min(iris["rx"], iris["ry"]) <= 0
+            ):
+                raise ValueError(f"eyes[{i}].iris: expected a finite ellipse with positive radii")
+            if not (0 <= iris["cx"] <= w and 0 <= iris["cy"] <= h):
+                raise ValueError(f"eyes[{i}].iris: the centre must be within source.png")
     for key in ("brow", "mouth", "nose"):
         region = rig["face"][key]
         if (
@@ -617,7 +651,7 @@ def validate_inputs(rig, rgba):
         *(
             f"eye{i}_{part}"
             for i in range(2)
-            for part in ("ball", "lash", "low", "crease")
+            for part in ("ball", "lash", "low", "crease", "white", "iris")
         ),
     }
     for i, accessory in enumerate(rig.get("accessories", [])):
@@ -686,11 +720,14 @@ def ball_inside(shape, curves, margin):
     return inside
 
 
-def open_eye_layer(rgba, eye, covered):
+def open_eye_layer(rgba, eye, covered, exact=False, matte=None):
     """The source pixels around an open eye: everything the cut-out eye layers redraw (lines, lids, the eye
     hole filled with skin), opaque over the eye region and a margin, fading out beyond it, with a hole where
     the eye ball layer alone shows the drawing. `covered` (hand, accessories) stays out, so those layers leave
-    no copy behind when they move.
+    no copy behind when they move. `exact` (an eye with iris layers): the hole is every pixel the eye layers
+    draw fully, with nothing to spare, because a rim of the picture kept around it would hold a strip of the
+    iris in place while the iris moves. `matte` (from tools/eye/iris.py): inside that hole, along the lids, the
+    lid's share of the pixels it blends into: its colour at that opacity, so the lid's soft edge stays in this layer.
     """
     h, w = rgba.shape[:2]
     region = polygon_mask((h, w), eye["roi"])
@@ -701,10 +738,19 @@ def open_eye_layer(rgba, eye, covered):
     alpha = np.clip(1 - distance / (OPEN_EYE_FEATHER + 1), 0, 1)
     shrink = 2 * OPEN_EYE_HOLE + 1
     hole = (cv2.erode(opening, np.ones((shrink, shrink), np.uint8)) > 0) & ball_inside((h, w), eye_curves(eye), 1)
+    if exact:
+        hole = ball_inside((h, w), eye_curves(eye), 0)
     alpha[hole] = 0
     alpha[covered > 0] = 0
     layer = rgba.copy()
     layer[..., 3] = np.rint(rgba[..., 3].astype(np.float32) * alpha).astype(np.uint8)
+    if matte is not None:
+        x, y = matte["origin"]
+        mh, mw = matte["alpha"].shape
+        part = layer[y : y + mh, x : x + mw]
+        on = (matte["alpha"] > 0) & hole[y : y + mh, x : x + mw] & (covered[y : y + mh, x : x + mw] == 0)
+        part[on, :3] = matte["colour"][on]
+        part[on, 3] = np.rint(matte["alpha"][on] * 255).astype(np.uint8)
     return crop_layer(layer, (layer[..., 3] > 0).astype(np.uint8) * 255, pad=1, soft=False)
 
 
@@ -751,6 +797,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         options += b"head-plate:" + HEAD_LAYERS.read_bytes() + HEAD_PLATE.read_bytes() + Path(plate).read_bytes() + Path(footprint).read_bytes()
     if rig.get("limbs"):  # only rigs with limbs depend on the limb cutter
         options += b"limbs:" + LIMB_LAYERS.read_bytes()
+    if any(eye.get("iris") is not None for eye in rig["eyes"]):  # only eyes with an iris depend on the iris cutter
+        options += b"iris:" + IRIS_LAYERS.read_bytes()
     build_id = hashlib.sha256(
         source.read_bytes() + rig_bytes + Path(__file__).read_bytes() + options
     ).hexdigest()[:12]
@@ -817,6 +865,20 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         eye_hole |= taken | core | stray | (white.astype(np.uint8) * 255 & near)
         eye.update(eye_curves(eye))
     skin_under = fill_skin(face, eye_hole)[..., :3]
+    # eyes with an iris outline: the eye white without the iris, and the iris as a sprite (tools/eye/iris.py)
+    iris_eyes, iris_mattes, iris_drawn, iris_notes = {}, {}, {}, []
+    for i, eye in enumerate(rig["eyes"]):
+        if eye.get("iris") is None:
+            continue
+        drawn = ball_inside((h, w), eye, 0)
+        pair, reason = iris_layers().cut(
+            face, eye, polygon_mask((h, w), eye["opening"]),
+            lambda shape, origin: drawn[origin[1] : origin[1] + shape[0], origin[0] : origin[0] + shape[1]],
+        )
+        if pair is None:
+            iris_notes.append(f"eye {i}: {reason}")
+            continue
+        iris_eyes[i], iris_mattes[i], iris_drawn[i] = pair, pair["matte"], drawn
     for i, ball, lines, inks in eye_parts:
         store(f"eye{i}_ball", *crop_layer(face, ball, pad=3, soft=False))
         for part, mask in lines.items():
@@ -825,16 +887,25 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
                 cv2.GaussianBlur(mask.astype(np.float32) / 255, (0, 0), 0.7) * 1.6, 0, 1
             )
             full[..., 3] = (full[..., 3] * edge).astype(np.uint8)
+            if i in iris_drawn:
+                # the line layers are unblended against skin, which is right beside the eye and wrong over it: where
+                # the eye layers draw fully they stay out (the lids' share of those pixels is in the open-eye layer)
+                full[..., 3][iris_drawn[i]] = 0
             store(
                 f"eye{i}_{part}",
                 *crop_layer(
                     full, (full[..., 3] > 0).astype(np.uint8) * 255, pad=2, soft=False
                 ),
             )
+    for i, pair in iris_eyes.items():
+        store(f"eye{i}_white", *pair["white"])
+        store(f"eye{i}_iris", *pair["iris"])
     meta["eyes"] = [
         {k: eye[k] for k in ("x0", "x1", "top", "bot")} for eye in rig["eyes"]
     ]
     meta["version"] = 1
+    if iris_eyes:
+        meta["iris"] = [iris_eyes[i]["report"] if i in iris_eyes else None for i in range(len(rig["eyes"]))]
 
     prefill, painted = (
         hand_prefill(rgba, remove, hand) if hand else (rgba, np.zeros_like(remove))
@@ -861,7 +932,7 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
             limbs[mask] = 255
     if open_eyes:
         for i, eye in enumerate(rig["eyes"]):
-            store(f"eye{i}_open", *open_eye_layer(rgba, eye, remove | accessory_bg | limbs))
+            store(f"eye{i}_open", *open_eye_layer(rgba, eye, remove | accessory_bg | limbs, exact=i in iris_eyes, matte=iris_mattes.get(i)))
     if lifted:
         # face_field, hair_front, and face_skin: the face without the lifted hair where it differs from the base (the
         # plate under the hair, and the eye regions filled like the base's), for runtimes that turn the face under the hair
@@ -876,7 +947,7 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         store("face_skin", *crop(under_base, under_base[..., 3]))
         if open_eyes:
             for i, eye in enumerate(rig["eyes"]):
-                store(f"eye{i}_open_under", *open_eye_layer(face, eye, remove | accessory_bg | limbs))
+                store(f"eye{i}_open_under", *open_eye_layer(face, eye, remove | accessory_bg | limbs, exact=i in iris_eyes, matte=iris_mattes.get(i)))
         meta["head"] = lifted["report"]
     if head and not lifted:
         # the picture the runtime draws as its base: without the limbs, with the garments kept
@@ -909,6 +980,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         (stage / "rig.json").replace(project / "rig.json")
     if head_note:
         print(f"build-layers: head layers left out: {head_note}", file=sys.stderr)
+    for note in iris_notes:
+        print(f"build-layers: iris layers left out: {note}", file=sys.stderr)
     print(
         json.dumps({"build": build_id, "size": [w, h], "layers": list(meta["layers"])})
     )
