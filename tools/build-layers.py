@@ -3,13 +3,22 @@
 
 Run with: uv run --with numpy --with pillow --with opencv-python-headless
           tools/build-layers.py <project-dir> [--rig rig.draft.json]
-          [--hairmask mask.png] [--cloth-under keep] [--open-eyes]
+          [--hairmask mask.png] [--cloth-under keep] [--open-eyes] [--head-layers]
+          [--head-plate plate.png --head-footprint mask.png]
 
 --hairmask takes the hair mask from a file (white is hair, exactly the size of source.png) instead of
 clustering hair colours. --cloth-under keep makes base_cloth.png the base with the garments kept: nothing
 is redrawn or inpainted under them and source_under.png is not read. --open-eyes also cuts eye0_open.png and
 eye1_open.png: the source pixels around each eye, with a hole for the eye ball, which runtimes that know them
-show while the eye is fully open (older runtimes ignore them). Without these options the output is unchanged.
+show while the eye is fully open (older runtimes ignore them). --head-layers also cuts face_field.png, hair_front.png
+and face_skin.png (see tools/head/layers.py): with them a head turn slides the face under the hair instead of bulging
+the whole head; when the picture does not allow it the reason is printed and they are left out (older runtimes ignore
+them; base.png is the same either way). --head-plate with --head-footprint makes the same three layers from a clean
+plate instead of by colour (see tools/head/plate.py): the plate is the picture without the hair in front of the face
+(source size; its alpha says where it is defined), the footprint says where that hair is (white, source size). The
+hair is then lifted off the plate exactly, the eye layers are cut from the face without that hair, and
+eye0_open_under.png / eye1_open_under.png are the open-eye layers of that face (with --open-eyes).
+Without these options the output is unchanged.
 
 A rig with `limbs` (generic limb chains) also gets limb_<name>.png for every limb and base_bare.png, the base without
 them, named by "bare" in layers.json (see tools/limbs/layers.py); base.png keeps the limbs for older runtimes.
@@ -24,6 +33,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -42,6 +52,42 @@ OPEN_EYE_HOLE = 2
 
 LIMB_LAYERS = Path(__file__).resolve().parent / "limbs" / "layers.py"
 _limb_layers = None
+HEAD_LAYERS = Path(__file__).resolve().parent / "head" / "layers.py"
+HEAD_PLATE = Path(__file__).resolve().parent / "head" / "plate.py"
+_head_layers = None
+_head_plate = None
+
+
+def head_plate():
+    """tools/head/plate.py, loaded from this folder without writing bytecode (only --head-plate needs it)."""
+    global _head_plate
+    if _head_plate is None:
+        spec = importlib.util.spec_from_file_location("mesh_avatar_head_plate", HEAD_PLATE)
+        module = importlib.util.module_from_spec(spec)
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        _head_plate = module
+    return _head_plate
+
+
+def head_layers():
+    """tools/head/layers.py, loaded from this folder without writing bytecode (only --head-layers needs it)."""
+    global _head_layers
+    if _head_layers is None:
+        spec = importlib.util.spec_from_file_location("mesh_avatar_head_layers", HEAD_LAYERS)
+        module = importlib.util.module_from_spec(spec)
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        _head_layers = module
+    return _head_layers
 
 
 def limb_layers():
@@ -673,7 +719,15 @@ def read_hairmask(path, size):
         return np.array(image.convert("L"))
 
 
-def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False):
+def read_plate(path, size):
+    """A clean plate: RGB or RGBA PNG, exactly the source size (without alpha it is defined everywhere)."""
+    with Image.open(path) as image:
+        if image.size != size:
+            raise ValueError(f"head plate: {image.size[0]}x{image.size[1]}, expected {size[0]}x{size[1]} like source.png")
+        return np.array(image.convert("RGBA"))
+
+
+def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False, head=False, plate=None, footprint=None):
     source = project / "source.png"
     rig_bytes = rig_path.read_bytes()
     rig = json.loads(rig_bytes)
@@ -691,6 +745,10 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False)
         options += f"cloth-under:{cloth_under}".encode()
     if open_eyes:
         options += b"open-eyes"
+    if head:
+        options += b"head-layers:" + HEAD_LAYERS.read_bytes()
+    if plate is not None:
+        options += b"head-plate:" + HEAD_LAYERS.read_bytes() + HEAD_PLATE.read_bytes() + Path(plate).read_bytes() + Path(footprint).read_bytes()
     if rig.get("limbs"):  # only rigs with limbs depend on the limb cutter
         options += b"limbs:" + LIMB_LAYERS.read_bytes()
     build_id = hashlib.sha256(
@@ -723,16 +781,34 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False)
         store(accessory["name"], *crop_layer(rgba, mask))
         accessory_bg |= cv2.dilate(mask, np.ones((5, 5), np.uint8))
 
+    # Head layers from a clean plate: the hair in front of the face is lifted off, and the face without it (`face`) is
+    # what the eye layers are cut from. base.png stays the whole picture.
+    head_note = None
+    lifted = None
+    face = rgba
+    if plate is not None:
+        outside = (remove | accessory_bg) > 0
+        for limb_mask in limb_layers().masks(rgba, rig) if rig.get("limbs") else []:
+            outside |= limb_mask
+        for cloth in rig.get("cloth", []):
+            outside |= polygon_mask((h, w), cloth["outline"]) > 0
+        lifted, head_note = head_plate().cut(
+            rgba, rig, read_plate(plate, (w, h)), read_hairmask(footprint, (w, h)),
+            head_layers().face_frame, head_layers().field_of, head_layers().MOVING, outside,
+        )
+        if lifted:
+            face = lifted["under"]
+
     eye_hole = np.zeros((h, w), np.uint8)
     eye_parts = []
     for i, eye in enumerate(rig["eyes"]):
-        ball, lash, low, crease, stray, core, white = eye_classes(rgba, eye)
+        ball, lash, low, crease, stray, core, white = eye_classes(face, eye)
         taken = cv2.erode(core, np.ones((3, 3), np.uint8))
         lines, inks = {}, {}
         region = polygon_mask((h, w), eye["roi"])
-        skin, _ = skin_samples(rgba, region)
+        skin, _ = skin_samples(face, region)
         for part, mask in (("lash", lash), ("low", low), ("crease", crease)):
-            inks[part] = infer_ink(rgba, mask, skin)
+            inks[part] = infer_ink(face, mask, skin)
             grown = cv2.dilate(mask, np.ones((5, 5), np.uint8)) & ~taken
             lines[part] = grown & cv2.dilate(region, np.ones((5, 5), np.uint8))
             taken |= lines[part]
@@ -740,11 +816,11 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False)
         near = cv2.dilate(core, np.ones((15, 15), np.uint8)) & ~core
         eye_hole |= taken | core | stray | (white.astype(np.uint8) * 255 & near)
         eye.update(eye_curves(eye))
-    skin_under = fill_skin(rgba, eye_hole)[..., :3]
+    skin_under = fill_skin(face, eye_hole)[..., :3]
     for i, ball, lines, inks in eye_parts:
-        store(f"eye{i}_ball", *crop_layer(rgba, ball, pad=3, soft=False))
+        store(f"eye{i}_ball", *crop_layer(face, ball, pad=3, soft=False))
         for part, mask in lines.items():
-            full = unblend(rgba, skin_under, mask, inks[part])
+            full = unblend(face, skin_under, mask, inks[part])
             edge = np.clip(
                 cv2.GaussianBlur(mask.astype(np.float32) / 255, (0, 0), 0.7) * 1.6, 0, 1
             )
@@ -786,6 +862,32 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False)
     if open_eyes:
         for i, eye in enumerate(rig["eyes"]):
             store(f"eye{i}_open", *open_eye_layer(rgba, eye, remove | accessory_bg | limbs))
+    if lifted:
+        # face_field, hair_front, and face_skin: the face without the lifted hair where it differs from the base (the
+        # plate under the hair, and the eye regions filled like the base's), for runtimes that turn the face under the hair
+        crop = head_layers()._crop
+        moving = lifted["field"] > head_layers().MOVING
+        store("face_field", *crop(np.clip(lifted["field"] * 255, 0, 255).astype(np.uint8), moving))
+        store("hair_front", *crop(lifted["hair"], lifted["hair"][..., 3]))
+        under_base = fill_skin(face, eye_hole)
+        weight = lifted["weight"].copy()
+        weight[(remove | accessory_bg | limbs) > 0] = 0
+        under_base[..., 3] = np.clip(np.rint(under_base[..., 3].astype(np.float32) * weight), 0, 255).astype(np.uint8)
+        store("face_skin", *crop(under_base, under_base[..., 3]))
+        if open_eyes:
+            for i, eye in enumerate(rig["eyes"]):
+                store(f"eye{i}_open_under", *open_eye_layer(face, eye, remove | accessory_bg | limbs))
+        meta["head"] = lifted["report"]
+    if head and not lifted:
+        # the picture the runtime draws as its base: without the limbs, with the garments kept
+        drawn = images.get("base_bare", images.get("base_cloth", images["base"]))
+        outside = (remove | accessory_bg | limbs) > 0
+        for cloth in rig.get("cloth", []):
+            outside |= polygon_mask((h, w), cloth["outline"]) > 0
+        tools = SimpleNamespace(polygon_mask=polygon_mask, ellipse_mask=ellipse_mask, skin_samples=skin_samples)
+        cut, head_note = head_layers().cut(drawn, rig, images["hairmask"], tools, outside, external_hair)
+        for name, (image, rect) in (cut or {}).items():
+            store(name, image, rect)
 
     # Calculate everything before replacing files. Keep sprites and unrelated
     # assets intact; only filenames in this build's manifest are consumed.
@@ -805,6 +907,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False)
             (stage / f"{name}.png").replace(out / f"{name}.png")
         (stage / "layers.json").replace(out / "layers.json")
         (stage / "rig.json").replace(project / "rig.json")
+    if head_note:
+        print(f"build-layers: head layers left out: {head_note}", file=sys.stderr)
     print(
         json.dumps({"build": build_id, "size": [w, h], "layers": list(meta["layers"])})
     )
@@ -838,9 +942,31 @@ def main():
         help="also cut eye0_open.png and eye1_open.png, the source pixels around each eye that newer "
         "runtimes show while the eye is fully open",
     )
+    parser.add_argument(
+        "--head-layers",
+        action="store_true",
+        help="also cut face_field.png, hair_front.png and face_skin.png, with which newer runtimes turn the face "
+        "under the hair (left out, with the reason on stderr, when the picture does not allow it)",
+    )
+    parser.add_argument(
+        "--head-plate",
+        type=Path,
+        help="the picture without the hair in front of the face (PNG, source size; alpha marks where it is defined): "
+        "head layers are lifted off it instead of being told apart by colour; needs --head-footprint",
+    )
+    parser.add_argument(
+        "--head-footprint",
+        type=Path,
+        help="where the hair missing from --head-plate is (PNG, white is hair, source size)",
+    )
     args = parser.parse_args()
+    if (args.head_plate is None) != (args.head_footprint is None):
+        parser.error("--head-plate and --head-footprint go together")
     try:
-        build(args.project_dir, args.project_dir / args.rig, args.hairmask, args.cloth_under, args.open_eyes)
+        build(
+            args.project_dir, args.project_dir / args.rig, args.hairmask, args.cloth_under, args.open_eyes, args.head_layers,
+            args.head_plate, args.head_footprint,
+        )
     except (OSError, ValueError, KeyError, TypeError, cv2.error) as error:
         print(f"build-layers: {error}", file=sys.stderr)
         return 1

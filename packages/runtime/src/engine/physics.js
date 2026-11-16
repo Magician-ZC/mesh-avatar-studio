@@ -66,7 +66,7 @@ export function createPhysics(engine, rig) {
 
     hairAnchor(at, P) {
       const p = [at[0], at[1]];
-      applyHead(p, 1, P);
+      applyHead(p, 1, P, engine.layered ? 0 : 1);
       applyBody(p, at[1], P);
       return p;
     }

@@ -48,7 +48,17 @@ explain coordinates and placement.
    `built/base.png`, `built/hairmask.png`, the four `eye{i}_ball/lash/low/crease.png` layers per
    eye, and `built/layers.json`. Hand and accessory layers are generated only when present
    in the rig. With `--open-eyes` it also writes `eye{i}_open.png`, the original pixels around
-   each eye that the runtime shows while the eye is fully open. The input draft remains unchanged. Existing generated files are replaced;
+   each eye that the runtime shows while the eye is fully open. With head layers a head turn slides the
+   face under the hair instead of bulging the whole head (`face_field.png`, `hair_front.png`,
+   `face_skin.png`; see [format.md](format.md)). `--head-plate plate.png --head-footprint mask.png` lifts
+   the hair off a clean plate: the same picture, pixel aligned, without the hair in front of the face
+   (its alpha marks where it is defined), and a mask of where that hair is. An image model's layer
+   decomposition gives both; so does an artist. The eye layers are then cut from the face without that
+   hair, and `layers.json` records how well the layers give the picture back (`head`). `--head-layers`
+   needs no plate: it tells hair from skin by colour, which works for a fringe that ends above the brows
+   and not for hair over the eyes. Either way the layers are left out, with the reason on stderr, when
+   the picture does not allow them, and the avatar turns its head the original way. The input draft
+   remains unchanged. Existing generated files are replaced;
    optional drawn sprites are preserved. Without `--rig`, the input is `rig.json`.
 4. In the editor, choose **Open project** and select it from the list, or browse for the whole project
    folder, including `source.png`, `rig.json` and `built/`. Use **Pose test** to check blinking

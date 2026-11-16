@@ -30,9 +30,15 @@ export const PARAMS = [
 
 // Reference algorithms are intentionally retained as JavaScript; the factory's rig input
 // and public TypeScript adapter are typed, with numerical regression covering this port.
-/** @param {import('../rig/types').Rig} rig */
-export function createRig(rig) {
+/**
+ * @param {import('../rig/types').Rig} rig
+ * @param {{ faceAt(x: number, y: number): number } | null} [headLayers] built head layers (tools/head/layers.py): faceAt
+ *   is the face field (0..1) of face_field.png. With it a head turn slides the face inside its contour, under the hair
+ *   layer, instead of bulging the whole head; without it everything below is the original code path.
+ */
+export function createRig(rig, headLayers = null) {
   const IMG = { w: rig.image.width, h: rig.image.height };
+  const FACE = headLayers?.faceAt ?? null;
   const gaussian = (x, y, a) => a ? Math.exp(-(((x - a.cx) / a.rx) ** 2 + ((y - a.cy) / a.ry) ** 2)) : 0;
   // ---- face features ----
   // Eye openings come from layers.json ("eyes", written when the layers were cut): the top / bottom edge of
@@ -110,7 +116,14 @@ export function createRig(rig) {
   function headWeight(x, y) { return 1 - sstep(...HEAD.weightBand, y); }
   // The turn bump already fades out towards its rim, so it only needs a gentle cut-off
   // (stacking both fades is what sheared the neck).
-  function turnWeight(x, y) { return 1 - sstep(...HEAD.turnBand, y); }
+  function turnWeight(x, y) {
+    const band = 1 - sstep(...HEAD.turnBand, y);
+    // head layers: the face field says where (and how much) a turn slides the picture; hair and everything
+    // outside the face stay where they are
+    return FACE ? band * FACE(x, y) : band;
+  }
+  // per-part depth offsets in units of the rig's own shift (they are sample pixels in the original turn)
+  const PART_X = HEAD.shiftX / 50, PART_Y = HEAD.shiftY / 40;
 
   // Hair strands: rest polylines root -> tip (4 nodes each), traced from the drawing.
   // Each one is a small spring chain in physics.js; vertices follow the strands near them.
@@ -177,6 +190,8 @@ export function createRig(rig) {
   // (A sphere projection was tried first; its rim has an infinite slope and kinked
   // the hair strands and fingers it crossed.)
   function turnOffset(x, y, ax, ay) {
+    // head layers: the whole shift, shaped by the face field in the turn weight
+    if (FACE) return [ax * HEAD.shiftX, -ay * HEAD.shiftY];
     const nx = (x - HEAD.cx) / HEAD.rx, ny = (y - HEAD.cy) / HEAD.ry;
     const t = 1 - nx * nx - ny * ny;
     if (t <= 0) return [0, 0];
@@ -246,10 +261,17 @@ export function createRig(rig) {
     // head turn, per part: nose and mouth travel further than the eyes, the far eye
     // narrows and the near eye widens, the ears and buns slide the other way
     const ax = P.angleX / 30, ay = P.angleY / 30;
-    p[0] += ax * (8 * w.nose + 5 * w.mouth) + (x - rig.face.eyeA.cx) * 0.12 * ax * w.eyeA - (x - rig.face.eyeB.cx) * 0.12 * ax * w.eyeB
-      - ax * 9 * w.earR + ax * 4 * w.earL - ax * 10 * (w.bunL + w.bunR);
-    p[1] -= ay * (6 * w.nose + 3 * w.mouth);
-    p[1] += (y - rig.face.eyeA.cy) * -0.06 * Math.abs(ay) * w.eyeA + (y - rig.face.eyeB.cy) * -0.06 * Math.abs(ay) * w.eyeB;
+    if (FACE) {
+      // head layers: the nose and mouth still lead a little; the eyes narrow and widen with the face field itself,
+      // and the ears and buns are outside the face, so they stay
+      p[0] += ax * PART_X * (8 * w.nose + 5 * w.mouth);
+      p[1] -= ay * PART_Y * (6 * w.nose + 3 * w.mouth);
+    } else {
+      p[0] += ax * (8 * w.nose + 5 * w.mouth) + (x - rig.face.eyeA.cx) * 0.12 * ax * w.eyeA - (x - rig.face.eyeB.cx) * 0.12 * ax * w.eyeB
+        - ax * 9 * w.earR + ax * 4 * w.earL - ax * 10 * (w.bunL + w.bunR);
+      p[1] -= ay * (6 * w.nose + 3 * w.mouth);
+      p[1] += (y - rig.face.eyeA.cy) * -0.06 * Math.abs(ay) * w.eyeA + (y - rig.face.eyeB.cy) * -0.06 * Math.abs(ay) * w.eyeB;
+    }
     applyHead(p, w.head, P, w.turn);
     applyBody(p, y, P, w.chest, w.breath, w.shoulder, w.legs);
     if (ARMS && w.arms.some(a => a.arm > 0)) {
@@ -334,5 +356,5 @@ export function createRig(rig) {
     const w = baseWeights(t.pivot[0], t.pivot[1]);
     return deformBase(t.pivot[0], t.pivot[1], w, P, phys, out);
   }
-  return { legs: LEGS, stepBody: (P, dt) => LEGS?.step(P, dt), IMG, EYES, MOUTH, CHEEKS, STRANDS, TASSELS, headWeight, turnWeight, baseWeights, deformBase, applyHead, applyBody, handWeights, handFrame, deformHand, eyePartY, eyePartAlpha, tasselAnchor };
+  return { layered: !!FACE, legs: LEGS, stepBody: (P, dt) => LEGS?.step(P, dt), IMG, EYES, MOUTH, CHEEKS, STRANDS, TASSELS, headWeight, turnWeight, baseWeights, deformBase, applyHead, applyBody, handWeights, handFrame, deformHand, eyePartY, eyePartAlpha, tasselAnchor };
 }

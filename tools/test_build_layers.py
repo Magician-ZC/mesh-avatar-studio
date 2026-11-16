@@ -400,5 +400,213 @@ class BuildLayersTest(unittest.TestCase):
             self.assertEqual(int(mask[y, x]), 0, (y, x))
 
 
+
+
+class HeadLayersTest(unittest.TestCase):
+    """--head-plate / --head-footprint (the hair lifted off a clean plate) and --head-layers (told apart by colour)."""
+
+    SKIN = (236, 200, 180, 255)
+    HAIR = (52, 36, 30, 255)
+    SIZE = (360, 420)
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.project = Path(self.temporary.name)
+        w, h = self.SIZE
+        rig = json.loads((ROOT / "samples/miko-qipao/rig.json").read_text())
+        for key in ("hand", "buns", "accessories", "strands"):
+            rig.pop(key, None)
+        rig["image"] = {"width": w, "height": h}
+        rig["head"].update(cx=180, cy=170, rx=150, ry=170)
+        rig["face"] = {
+            "nose": {"cx": 180, "cy": 222, "rx": 16, "ry": 16}, "mouth": {"cx": 180, "cy": 262, "rx": 30, "ry": 14},
+            "eyeA": {"cx": 130, "cy": 190, "rx": 34, "ry": 24}, "eyeB": {"cx": 230, "cy": 190, "rx": 34, "ry": 24},
+            "earR": {"cx": 290, "cy": 200, "rx": 12, "ry": 22}, "earL": {"cx": 70, "cy": 200, "rx": 12, "ry": 22},
+            "brow": {"cx": 180, "cy": 160, "rx": 80, "ry": 8, "band": [168, 176]}, "jaw": {"cx": 180, "cy": 290, "rx": 50, "ry": 26, "band": [270, 282]},
+        }
+        rig["mouth"].update(cx=180, cy=262, angle=0, halfLen=20, bow=2)
+        rig["mouth"]["area"] = {"cx": 180, "cy": 264, "rx": 30, "ry": 16, "angle": 0}
+        rig["cheeks"] = [[120, 235], [240, 235]]
+        rig["mesh"]["fine"] = {"x0": 40, "x1": 320, "y0": 20, "y1": 340, "cell": 7}
+        rig["eyes"] = []
+        for left in (110, 210):
+            rig["eyes"].append({
+                "opening": [[left, 182], [left + 40, 182], [left + 40, 198], [left, 198]],
+                "roi": [[left - 8, 172], [left + 48, 172], [left + 48, 206], [left - 8, 206]],
+            })
+        self.rig = rig
+        # the plate: a face on a body, no hair in front of the face
+        plate = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(plate)
+        draw.ellipse((60, 40, 300, 330), fill=self.SKIN)  # the head
+        draw.rectangle((120, 300, 240, 419), fill=(90, 110, 170, 255))  # neck and garment
+        for left in (110, 210):
+            draw.rectangle((left, 182, left + 40, 198), fill=(250, 250, 250, 255))
+            draw.ellipse((left + 12, 182, left + 28, 198), fill=(90, 60, 40, 255))
+            draw.line((left, 181, left + 40, 181), fill=(30, 22, 20, 255), width=3)
+        draw.line((160, 262, 200, 262), fill=(170, 80, 80, 255), width=3)
+        self.plate = plate
+        # the source: the same with hair - a cap over the head and a fringe down to the brows, one lock by the left eye
+        source = plate.copy()
+        draw = ImageDraw.Draw(source)
+        draw.pieslice((50, 24, 310, 300), 180, 360, fill=self.HAIR)
+        hair = Image.new("L", (w, h), 0)
+        mask = ImageDraw.Draw(hair)
+        for box in ((80, 100, 280, 166), (62, 150, 96, 250)):
+            draw.rectangle(box, fill=self.HAIR)
+            mask.rectangle(box, fill=255)
+        mask.pieslice((50, 24, 310, 300), 180, 360, fill=255)
+        source.save(self.project / "source.png")
+        self.plate_path = self.project / "plate.png"
+        self.footprint_path = self.project / "footprint.png"
+        plate.save(self.plate_path)
+        hair.save(self.footprint_path)
+        (self.project / "rig.draft.json").write_text(json.dumps(rig))
+
+    def run_cli(self, *options):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), str(self.project), "--rig", "rig.draft.json", *options],
+            capture_output=True, text=True, check=False,
+        )
+
+    def meta(self):
+        return json.loads((self.project / "built/layers.json").read_text())
+
+    def layer(self, name):
+        """A built layer at the source's size (transparent outside its rectangle)."""
+        w, h = self.SIZE
+        x, y, lw, lh = self.meta()["layers"][name]
+        full = np.zeros((h, w, 4), np.uint8)
+        with Image.open(self.project / f"built/{name}.png") as image:
+            pixels = np.array(image.convert("RGBA") if image.mode != "L" else image.convert("RGBA"))
+        self.assertEqual(pixels.shape[:2], (lh, lw))
+        full[y : y + lh, x : x + lw] = pixels
+        return full
+
+    @staticmethod
+    def over(below, above):
+        a = above[..., 3:4].astype(np.float32) / 255
+        out = below.astype(np.float32).copy()
+        out[..., :3] = below[..., :3] * (1 - a) + above[..., :3] * a
+        return out
+
+    def test_the_plate_lifts_the_hair_in_front_of_the_face_and_the_resting_picture_stays_the_source(self):
+        plain = self.run_cli("--open-eyes")
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        plain_meta = self.meta()
+        plain_files = {p.name: p.read_bytes() for p in (self.project / "built").glob("*.png")}
+        self.assertFalse({"face_field", "hair_front", "face_skin"} & set(plain_meta["layers"]))
+
+        result = self.run_cli("--open-eyes", "--head-plate", str(self.plate_path), "--head-footprint", str(self.footprint_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("left out", result.stderr)
+        meta = self.meta()
+        self.assertNotEqual(meta["build"], plain_meta["build"])
+        for name in ("face_field", "hair_front", "face_skin", "eye0_open_under", "eye1_open_under"):
+            self.assertIn(name, meta["layers"])
+        self.assertLess(meta["head"]["restMean"], 1.0)
+        self.assertLessEqual(max(abs(v) for v in meta["head"]["shift"]), 0.2)
+        # what older runtimes draw is untouched: the base and every layer they know are the same files
+        for name, data in plain_files.items():
+            self.assertEqual((self.project / "built" / name).read_bytes(), data, name)
+
+        with Image.open(self.project / "source.png") as image:
+            source = np.array(image.convert("RGBA"))
+        plate = np.array(self.plate)
+        hair, skin, field = self.layer("hair_front"), self.layer("face_skin"), self.layer("face_field")
+        # the fringe over the forehead is on the hair layer, entirely, in the source's own colour
+        self.assertEqual(hair[130, 180].tolist(), list(self.HAIR))
+        self.assertEqual(hair[200, 80].tolist(), list(self.HAIR))  # the lock beside the eye
+        # the face below the fringe is not
+        self.assertEqual(int(hair[230, 180, 3]), 0)
+        self.assertEqual(int(hair[190, 130, 3]), 0)  # an eye
+        # under the lifted hair lies the plate: skin, where the base still has the hair
+        self.assertEqual(skin[130, 180].tolist(), plate[130, 180].tolist())
+        self.assertEqual(int(skin[230, 180, 3]), 0)  # nothing where there was no hair
+        # the field: the whole shift on the face, none on the hair far above it
+        self.assertEqual(int(field[225, 180, 0]), 255)
+        self.assertEqual(int(field[40, 180, 0]), 0)
+        # hair far from the moving face stays in the base only (the top of the cap)
+        self.assertEqual(int(hair[40, 180, 3]), 0)
+        # at rest - the patch over the picture, the hair layer over that - the picture is the source again
+        rest = self.over(self.over(source, skin), hair)
+        error = np.abs(rest[..., :3] - source[..., :3]).max(-1)[source[..., 3] > 0]
+        self.assertLess(float(error.mean()), 0.5)
+        self.assertLess(float(np.percentile(error, 99.5)), 16)
+
+    def test_open_eye_layers_of_the_face_without_the_hair_carry_no_hair(self):
+        # a strand of the fringe hangs into the right eye's region
+        with Image.open(self.project / "source.png") as image:
+            source = image.convert("RGBA")
+        ImageDraw.Draw(source).rectangle((236, 150, 244, 190), fill=self.HAIR)
+        source.save(self.project / "source.png")
+        with Image.open(self.footprint_path) as image:
+            footprint = image.convert("L")
+        ImageDraw.Draw(footprint).rectangle((236, 150, 244, 190), fill=255)
+        footprint.save(self.footprint_path)
+        result = self.run_cli("--open-eyes", "--head-plate", str(self.plate_path), "--head-footprint", str(self.footprint_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("left out", result.stderr)
+        plate = np.array(self.plate)
+        classic, under, hair = self.layer("eye1_open"), self.layer("eye1_open_under"), self.layer("hair_front")
+        # the layer older runtimes draw keeps the strand; the one drawn under the hair layer shows the plate's eye region
+        self.assertEqual(classic[178, 240].tolist(), list(self.HAIR))
+        self.assertEqual(under[178, 240].tolist(), plate[178, 240].tolist())
+        # and the strand itself is on the hair layer, down to its tip
+        self.assertEqual(hair[178, 240].tolist(), list(self.HAIR))
+        self.assertEqual(hair[188, 240].tolist(), list(self.HAIR))
+
+    def test_a_plate_that_is_no_plate_leaves_the_head_layers_out_and_says_why(self):
+        # the "plate" still has the hair: nothing can be lifted
+        with Image.open(self.project / "source.png") as image:
+            image.save(self.plate_path)
+        result = self.run_cli("--head-plate", str(self.plate_path), "--head-footprint", str(self.footprint_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("head layers left out", result.stderr)
+        self.assertFalse({"face_field", "hair_front", "face_skin"} & set(self.meta()["layers"]))
+        # a plate of another size is an input error: nothing is written
+        before = (self.project / "built/layers.json").read_text()
+        self.plate.resize((180, 210)).save(self.plate_path)
+        result = self.run_cli("--head-plate", str(self.plate_path), "--head-footprint", str(self.footprint_path))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("head plate", result.stderr)
+        self.assertEqual((self.project / "built/layers.json").read_text(), before)
+        # the two options go together
+        result = self.run_cli("--head-plate", str(self.plate_path))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--head-footprint", result.stderr)
+
+    def test_head_layers_by_colour_cut_the_fringe_and_refuse_hair_over_an_eye(self):
+        mask = self.project / "hair.png"
+        with Image.open(self.footprint_path) as image:
+            image.save(mask)
+        result = self.run_cli("--hairmask", str(mask), "--head-layers")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("left out", result.stderr)
+        meta = self.meta()
+        for name in ("face_field", "hair_front", "face_skin"):
+            self.assertIn(name, meta["layers"])
+        hair, skin = self.layer("hair_front"), self.layer("face_skin")
+        self.assertEqual(hair[130, 180].tolist(), list(self.HAIR))
+        self.assertEqual(int(hair[230, 180, 3]), 0)
+        # under the fringe: skin continued from the face (no plate to take it from), close to the face's own colour
+        self.assertEqual(int(skin[130, 180, 3]), 255)
+        self.assertLess(int(np.abs(skin[130, 180, :3].astype(int) - np.array(self.SKIN[:3])).max()), 12)
+        # a wide lock over the left eye cannot be told from the eye's own layers: the layers are left out, with the reason
+        with Image.open(self.project / "source.png") as image:
+            source = image.convert("RGBA")
+        ImageDraw.Draw(source).rectangle((104, 150, 128, 204), fill=self.HAIR)
+        source.save(self.project / "source.png")
+        with Image.open(mask) as image:
+            wider = image.convert("L")
+        ImageDraw.Draw(wider).rectangle((104, 150, 128, 204), fill=255)
+        wider.save(mask)
+        result = self.run_cli("--hairmask", str(mask), "--head-layers")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("head layers left out: hair hangs over eye 0", result.stderr)
+        self.assertFalse({"face_field", "hair_front", "face_skin"} & set(self.meta()["layers"]))
+
+
 if __name__ == "__main__":
     unittest.main()

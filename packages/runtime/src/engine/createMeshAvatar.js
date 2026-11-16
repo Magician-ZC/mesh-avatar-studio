@@ -73,6 +73,9 @@ function deformTassel(ch, mesh) {
   }
 }
 
+// Optional head layers (built by tools/head/layers.py, see docs/format.md).
+const FACE_FIELD = 'face_field', HAIR_FRONT = 'hair_front', FACE_SKIN = 'face_skin';
+
 /** @param {HTMLCanvasElement} canvas
  * @param {import('./index').MeshAvatarOptions} options */
 export async function createMeshAvatarImpl(canvas, options) {
@@ -80,14 +83,6 @@ export async function createMeshAvatarImpl(canvas, options) {
     throw new Error('createMeshAvatar requires assets or assetsBase.');
   }
   const rig = options.rig;
-  const engine = createRig(rig);
-  const { IMG, EYES, baseWeights, deformBase, eyePartY, eyePartAlpha,
-    handWeights, handFrame, deformHand, TASSELS } = engine;
-  const { Renderer, buildGrid } = createRenderer(engine, rig);
-  const { Physics } = createPhysics(engine, rig);
-  const { Cloth } = createCloth(engine, rig);
-  const CLOTH = rig.cloth ?? [];
-  const { createSprites } = createSpriteModule(engine, rig);
   const base = (options.assetsBase ?? '').replace(/\/?$/, '/');
   const asset = (name, build) => {
     if (options.assets) {
@@ -97,6 +92,36 @@ export async function createMeshAvatarImpl(canvas, options) {
     return `${base}${name}${build === undefined ? '' : `?b=${build}`}`;
   };
   const meta = await loadJson(asset('layers.json'));
+  // optional head layers (tools/head/layers.py): with face_field a head turn slides the face inside its contour instead
+  // of bulging the whole head; hair_front and face_skin (always together) put the hair over the face on its own layer,
+  // with skin under it. An avatar without them, or a runtime that cannot load them, turns the head the original way.
+  let head = null;
+  if (meta.layers?.[FACE_FIELD]) {
+    try {
+      // the hair layer comes with a skin layer under it, unless the base itself is the picture without that hair
+      const names = [FACE_FIELD, ...(meta.layers[HAIR_FRONT] ? [HAIR_FRONT] : []), ...(meta.layers[HAIR_FRONT] && meta.layers[FACE_SKIN] ? [FACE_SKIN] : [])];
+      const loaded = await Promise.all(names.map(n => loadImage(asset(`${n}.png`, meta.build))));
+      const mask = loaded[0], hair = names.includes(HAIR_FRONT) ? loaded[1] : null, skin = names.includes(FACE_SKIN) ? loaded[2] : null;
+      const [fx, fy] = meta.layers[FACE_FIELD], fw = mask.width, fh = mask.height, field = channelOf(mask, 0);
+      head = {
+        hair: hair ?? null, skin: skin ?? null,
+        faceAt(x, y) {
+          const u = Math.round(x) - fx, v = Math.round(y) - fy;
+          return u < 0 || v < 0 || u >= fw || v >= fh ? 0 : field[v * fw + u] / 255;
+        },
+      };
+    } catch (err) {
+      console.warn('head layers not loaded:', err);
+    }
+  }
+  const engine = createRig(rig, head);
+  const { IMG, EYES, baseWeights, deformBase, eyePartY, eyePartAlpha,
+    handWeights, handFrame, deformHand, TASSELS } = engine;
+  const { Renderer, buildGrid } = createRenderer(engine, rig);
+  const { Physics } = createPhysics(engine, rig);
+  const { Cloth } = createCloth(engine, rig);
+  const CLOTH = rig.cloth ?? [];
+  const { createSprites } = createSpriteModule(engine, rig);
 
   // with garments the base drawing is the one without them (base.png keeps them for older runtimes)
   const baseName = CLOTH.length ? 'base_cloth' : 'base';
@@ -145,6 +170,22 @@ export async function createMeshAvatarImpl(canvas, options) {
   }
   R.addLayer('base', imgs.base, baseMesh, { face: true });
 
+  // head layers: the skin under the hair moves with the face and hides the base's own copy of that hair
+  const headCell = rig.mesh.fine?.cell ?? rig.mesh.baseCell;
+  const headLayer = (name, img, hairLayer) => {
+    const mesh = buildGrid(rects[name], headCell, alphaOf(img), img.width);
+    const W = [];
+    for (let k = 0; k < mesh.rest.length / 2; k++) {
+      const x = mesh.rest[k * 2], y = mesh.rest[k * 2 + 1];
+      const w = baseWeights(x, y, hairAt(x, y));
+      // the hair layer sways and rolls with the head but does not slide with the face
+      W.push(hairLayer ? { ...w, turn: 0, nose: 0, mouth: 0, brow: 0, jaw: 0 } : w);
+    }
+    return { mesh, W, layer: null };
+  };
+  const faceSkin = head?.skin ? headLayer(FACE_SKIN, head.skin, false) : null;
+  if (faceSkin) faceSkin.layer = R.addLayer(FACE_SKIN, head.skin, faceSkin.mesh);
+
   // eyes: white+iris clipped by the lids, then the line layers on top
   const eyeParts = [];
   EYES.forEach((e, i) => {
@@ -161,7 +202,9 @@ export async function createMeshAvatarImpl(canvas, options) {
   // optional open-eye layers (see open-eyes.js): the drawn pixels over the cut-out lids while an eye is open
   const openEyes = [];
   for (let i = 0; i < EYES.length; i++) {
-    const n = openEyeLayerName(i);
+    // under a hair layer the open eye is the one of the face without that hair (the hair is drawn above it)
+    const under = `${openEyeLayerName(i)}_under`;
+    const n = head?.hair && meta.layers?.[under] ? under : openEyeLayerName(i);
     if (!meta.layers?.[n]) continue;
     const img = await loadImage(asset(`${n}.png`, meta.build));
     const mesh = buildGrid(rects[n], rig.mesh.eyeCell, alphaOf(img), img.width);
@@ -185,6 +228,10 @@ export async function createMeshAvatarImpl(canvas, options) {
   } catch (err) {
     console.warn('eye / mouth sprites not loaded:', err);
   }
+
+  // head layers: the hair over the face, above the eyes and the drawn eye / mouth variants
+  const hairFront = head?.hair ? headLayer(HAIR_FRONT, head.hair, true) : null;
+  if (hairFront) hairFront.layer = R.addLayer(HAIR_FRONT, head.hair, hairFront.mesh);
 
   CLOTH.filter(c => !c.behind).forEach(addCloth);
 
@@ -276,6 +323,14 @@ export async function createMeshAvatarImpl(canvas, options) {
       const r = oe.mesh.rest, o = oe.mesh.pos;
       for (let k = 0; k < oe.W.length; k++) {
         deformBase(r[k * 2], r[k * 2 + 1], oe.W[k], P, phys, tmp);
+        o[k * 2] = tmp[0]; o[k * 2 + 1] = tmp[1];
+      }
+    }
+    for (const item of [faceSkin, hairFront]) {
+      if (!item) continue;
+      const r = item.mesh.rest, o = item.mesh.pos;
+      for (let k = 0; k < item.W.length; k++) {
+        deformBase(r[k * 2], r[k * 2 + 1], item.W[k], P, phys, tmp);
         o[k * 2] = tmp[0]; o[k * 2 + 1] = tmp[1];
       }
     }
