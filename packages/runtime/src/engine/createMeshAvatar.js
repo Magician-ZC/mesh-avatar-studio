@@ -7,6 +7,7 @@ import { createPhysics } from './physics.js';
 import { createCloth } from './cloth.js';
 import { createSpriteModule, eyeMood } from './sprites.js';
 import { openEyeAlpha, openEyeLayerName } from './open-eyes.js';
+import { eyePartNames, gazeShift, hasIrisLayers, irisLayerNames, irisRim, isEyeFill } from './iris-layers.js';
 import { createOverlayLayers } from './overlays.js';
 import { Motion } from './motion.js';
 import { ExpressionOverlay } from './expression-overlay.js';
@@ -15,8 +16,6 @@ import { MOTIONS, IDLE_MOTIONS } from './motions.js';
 import { clientToImage, imageToClient } from '../interaction/coordinates.ts';
 import { createImpulse } from '../interaction/impulse.ts';
 import { createLimbs } from '../limbs/runtime.ts';
-
-const EYE_PARTS = ['ball', 'low', 'crease', 'lash'];   // back to front
 
 const imageCache = new Map();
 const jsonCache = new Map();
@@ -128,7 +127,18 @@ export async function createMeshAvatarImpl(canvas, options) {
   // with limb chains (ER4) the base is the bare one, without the limbs (layers.json "bare"; base.png keeps them)
   const LIMBS = rig.limbs ?? [];
   const bareName = LIMBS.length && typeof meta.bare === 'string' ? meta.bare : null;
-  const names = [baseName, ...(bareName ? [bareName] : []), ...(rig.hand ? ['hand'] : []), ...TASSELS.map(t => t.name), ...CLOTH.map(c => `cloth_${c.name}`), ...LIMBS.map(l => `limb_${l.name}`), ...[0, 1].flatMap(i => EYE_PARTS.map(p => `eye${i}_${p}`)), 'hairmask'];
+  // iris layers (see iris-layers.js): an eye with both is drawn from them, not from its eye ball
+  const irisEyes = await Promise.all([0, 1].map(async i => {
+    if (!hasIrisLayers(meta.layers, i)) return false;
+    try {
+      await Promise.all(Object.values(irisLayerNames(i)).map(n => loadImage(asset(`${n}.png`, meta.build))));
+      return true;
+    } catch (err) {
+      console.warn(`iris layers of eye ${i} not loaded:`, err);
+      return false;
+    }
+  }));
+  const names = [baseName, ...(bareName ? [bareName] : []), ...(rig.hand ? ['hand'] : []), ...TASSELS.map(t => t.name), ...CLOTH.map(c => `cloth_${c.name}`), ...LIMBS.map(l => `limb_${l.name}`), ...[0, 1].flatMap(i => eyePartNames(irisEyes[i]).map(p => `eye${i}_${p}`)), 'hairmask'];
   const imgs = Object.fromEntries(await Promise.all(names.map(async n => [n, await loadImage(asset(`${n}.png`, meta.build))])));
   if (CLOTH.length) imgs.base = imgs.base_cloth;
   if (bareName) imgs.base = imgs[bareName];
@@ -189,12 +199,12 @@ export async function createMeshAvatarImpl(canvas, options) {
   // eyes: white+iris clipped by the lids, then the line layers on top
   const eyeParts = [];
   EYES.forEach((e, i) => {
-    for (const part of EYE_PARTS) {
+    for (const part of eyePartNames(irisEyes[i])) {
       const n = `eye${i}_${part}`;
-      const mesh = buildGrid(rects[n], part === 'ball' ? rig.mesh.eyeBallCell : rig.mesh.eyeCell, alphaOf(imgs[n]), imgs[n].width);
+      const mesh = buildGrid(rects[n], isEyeFill(part) ? rig.mesh.eyeBallCell : rig.mesh.eyeCell, alphaOf(imgs[n]), imgs[n].width);
       const W = [];
       for (let k = 0; k < mesh.rest.length / 2; k++) W.push(baseWeights(mesh.rest[k * 2], mesh.rest[k * 2 + 1], 0));
-      const layer = R.addLayer(n, imgs[n], mesh, { eyeBall: part === 'ball' ? i : undefined });
+      const layer = R.addLayer(n, imgs[n], mesh, { eyeBall: part === 'ball' ? i : undefined, eyeWhite: part === 'white' ? i : undefined, eyeIris: part === 'iris' ? i : undefined });
       eyeParts.push({ e, eye: i, part, mesh, W, layer });
     }
   });
@@ -300,24 +310,31 @@ export async function createMeshAvatarImpl(canvas, options) {
     // with drawn eye sprites the layered eye is only ever shown exactly as drawn: moving the
     // cut-out lash leaves seams at its edges
     const eyeOpenFor = (v, eye) => (sprites?.eyesDrawn[eye] ? 1 : v);
+    // px of iris travel; rig.view.irisTravel scales it for large eyes
+    const gaze = gazeShift(P.gazeX, P.gazeY, rig.view.irisTravel ?? 7);
     for (const ep of eyeParts) {
       const open = eyeOpenFor(ep.eye === 0 ? P.eyeROpen : P.eyeLOpen, ep.eye);
       const smile = ep.eye === 0 ? P.eyeSmile : (P.eyeSmileL ?? P.eyeSmile);
       ep.layer.alpha = eyePartAlpha(ep.part, open, smile);
+      // an iris layer is a sprite: it moves by the gaze as it is, then with the head like every eye layer
+      const sx = ep.part === 'iris' ? gaze[ep.eye][0] : 0, sy = ep.part === 'iris' ? gaze[ep.eye][1] : 0;
       const r = ep.mesh.rest, o = ep.mesh.pos;
       for (let k = 0; k < ep.W.length; k++) {
         const x = r[k * 2], y = r[k * 2 + 1];
-        deformBase(x, eyePartY(ep.e, ep.part, x, y, open, smile), ep.W[k], P, phys, tmp);
+        deformBase(x + sx, eyePartY(ep.e, ep.part, x, y, open, smile) + sy, ep.W[k], P, phys, tmp);
         o[k * 2] = tmp[0]; o[k * 2 + 1] = tmp[1];
       }
     }
     // the motion expression is not applied in manual mode, so only the live one counts there
     const cover = sprites?.update(P, phys, dt, eyeMood(expression.name, motion.mode === 'manual' ? null : motion.expr));
     if (cover) for (const ep of eyeParts) if (cover.eyes[ep.eye]) ep.layer.alpha = 0;
+    const eyeRim = [irisRim(0), irisRim(0)], openShown = [0, 0];
     for (const oe of openEyes) {
       const alpha = openEyeAlpha(oe.eye === 0 ? P.eyeROpen : P.eyeLOpen, oe.eye === 0 ? P.eyeSmile : (P.eyeSmileL ?? P.eyeSmile),
         Boolean(sprites?.eyesDrawn[oe.eye]), Boolean(cover?.eyes[oe.eye]));
       oe.layer.alpha = alpha;
+      eyeRim[oe.eye] = irisRim(alpha);
+      openShown[oe.eye] = alpha;
       oe.layer.visible = alpha > 0;
       if (!oe.layer.visible) continue;
       const r = oe.mesh.rest, o = oe.mesh.pos;
@@ -326,6 +343,9 @@ export async function createMeshAvatarImpl(canvas, options) {
         o[k * 2] = tmp[0]; o[k * 2 + 1] = tmp[1];
       }
     }
+    // An iris eye's open-eye layer has its hole right at the lids. While it is fully shown the line layers under it
+    // are not drawn: under its edge, however the textures are filtered, only the eye itself may lie.
+    for (const ep of eyeParts) if (irisEyes[ep.eye] && !isEyeFill(ep.part) && openShown[ep.eye] >= 0.999) ep.layer.alpha = 0;
     for (const item of [faceSkin, hairFront]) {
       if (!item) continue;
       const r = item.mesh.rest, o = item.mesh.pos;
@@ -344,13 +364,13 @@ export async function createMeshAvatarImpl(canvas, options) {
     if (CLOTH.length) { cloth.step(P, dt, phys); cloth.deform(); }
     if (limbs) { limbs.step(dt); limbs.deform(P, phys); }
 
-    const ball = rig.view.irisTravel ?? 7; // px of iris travel; rig.view.irisTravel scales it for large eyes
     R.draw({
       angleX: P.angleX, angleY: P.angleY, angleZ: P.angleZ,
       eyes: [
-        eyeOpenFor(P.eyeROpen, 0), P.eyeSmile, P.gazeX * ball, -P.gazeY * ball * 0.6,
-        eyeOpenFor(P.eyeLOpen, 1), P.eyeSmileL ?? P.eyeSmile, P.gazeX * ball * 0.85, -P.gazeY * ball * 0.6,
+        eyeOpenFor(P.eyeROpen, 0), P.eyeSmile, gaze[0][0], gaze[0][1],
+        eyeOpenFor(P.eyeLOpen, 1), P.eyeSmileL ?? P.eyeSmile, gaze[1][0], gaze[1][1],
       ],
+      eyeRim,
       // with sprites the drawn mouths replace the shader-painted one
       mouthOpen: cover?.mouthDrawn ? 0 : P.mouthOpen, mouthForm: P.mouthForm, cheek: P.blush,
       showMesh: false, originalAlpha: 0, joints: [],

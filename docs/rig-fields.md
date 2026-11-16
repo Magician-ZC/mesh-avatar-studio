@@ -10,7 +10,7 @@ radii and mesh cell sizes must be positive. Mesh cell sizes and fine-mesh rectan
 coordinates must be integers. Accessory boxes must be integer rectangles inside the image. A band is `[start, end]` with `start < end`.
 Ellipses are smooth influence regions, not hard cut-out boundaries.
 
-Only `buns`, `strands`, `accessories`, `hand`, `view.gazeCenter`, `view.irisTravel`, `view.rotation` and `physics` are optional. Omit absent
+Only `buns`, `strands`, `accessories`, `hand`, `eyes[*].iris`, `view.gazeCenter`, `view.irisTravel`, `view.rotation` and `physics` are optional. Omit absent
 optional groups. Required regions must still be placed even if their animation will be small.
 The initial draft has empty eye polygons and is intentionally invalid until they are traced.
 See [agent-guide.md](agent-guide.md) for the process and [rig-mapping.md](rig-mapping.md) for
@@ -94,6 +94,7 @@ the engine mapping. Do not copy the example illustration's coordinates into a ne
 | `eyes[*].x1` | Generated rightmost opening x, px; omit in draft, builder computes it. |
 | `eyes[*].top` | Generated 24 upper-edge y samples, px, evenly spaced x0→x1; omit in draft. |
 | `eyes[*].bot` | Generated 24 lower-edge y samples, px, evenly spaced x0→x1; omit in draft. |
+| `eyes[*].iris` | Optional ellipse `{cx, cy, rx, ry}`, px: the iris outline (its dark ring included), also where the lids cover it. With it the builder cuts `eye{i}_white` and `eye{i}_iris`, and the iris moves as a sprite instead of the eye ball being warped. Give it for an eye whose iris is about as tall as the opening or taller (most semi-realistic eyes); a tall drawn eye with white all around the iris does not need it. Trace it on the white on both sides; a little too large is harmless, too small leaves a dark ring in the white. |
 | `mouth.cx` | Closed mouth line centre x, px; between lip corners. |
 | `mouth.cy` | Centre y of the straight line through lip corners, px; bow adds curvature. |
 | `mouth.angle` | Angle of lip-corner line, radians; positive slopes down to image-right. |

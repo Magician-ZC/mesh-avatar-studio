@@ -68,7 +68,7 @@ const schema = (draft: boolean) => object({
     jaw: object({ ...ellipseFields, band }) }),
   buns: object({ bunL: ellipse, bunR: ellipse }, ['bunL', 'bunR']),
   eyes: array(object({ opening: polygon, roi: polygon, x0: number, x1: number,
-    top: array(number, 24, 24), bot: array(number, 24, 24) }, draft ? ['x0', 'x1', 'top', 'bot'] : []), 2, 2),
+    top: array(number, 24, 24), bot: array(number, 24, 24), iris: ellipse }, draft ? ['x0', 'x1', 'top', 'bot', 'iris'] : ['iris']), 2, 2),
   mouth: object({ cx: number, cy: number, angle: number, halfLen: positive, bow: number,
     area: object({ ...ellipseFields, angle: number }) }),
   cheeks: array(point, 2, 2),

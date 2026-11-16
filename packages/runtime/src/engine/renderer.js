@@ -31,6 +31,7 @@ export function createRenderer(engine, rig) {
   uniform float uEyeTop[48]; // 2 eyes x EYE_N samples
   uniform float uEyeBot[48];
   uniform vec4 uEyeState[2]; // open, smile, ballX(px), ballY(px)
+  uniform vec2 uEyeRim;      // per eye: px the white and iris layers are drawn beyond the lids (under an open-eye layer)
   uniform vec4 uMouth;       // cx, cy, angle, halfLen
   uniform vec4 uMouthState;  // open, form, bow, -
   uniform vec4 uCheeks;      // x0, y0, x1, y1
@@ -94,18 +95,31 @@ export function createRenderer(engine, rig) {
     return (vec2(x, y) - uRect.xy) / uRect.zw;
   }
 
-  // Eye white + iris layer: shown only between the lids (the lids cover it, it never squashes);
-  // the iris slides inside the opening for the gaze.
-  vec4 eyeBall(int e, vec2 p) {
+  // The eye between the lids, one function for its three kinds of layer (and one call, so the lid curves are
+  // compiled once):
+  // 0, the eye ball: eye white + iris in one picture, shown only between the lids (the lids cover it, it never
+  //    squashes); the iris slides inside the opening for the gaze.
+  // 1 and 2, eye white and iris as two layers (optional data, see iris-layers.js): the white is drawn where it is,
+  //    the iris is a sprite whose vertices have moved by the gaze, so the lids clip it where it is now. Their clip
+  //    lies rim px beyond the lids: 1 px under the line layers, 3 px under an open-eye layer, which covers
+  //    everything outside its hole; whatever shows at the hole's edge, however the textures are filtered, must be
+  //    the eye and not the base.
+  vec4 eyeLayer(int e, vec2 p, int kind) {
     vec4 box = uEyeBox[e]; vec4 st = uEyeState[e];
-    float u = clamp((p.x - box.x) / (box.y - box.x), 0.0, 1.0);
+    vec2 q = kind == 2 ? p + st.zw : p;
+    float rim = kind == 0 ? 0.0 : (e == 0 ? uEyeRim.x : uEyeRim.y);
+    float u = clamp((q.x - box.x) / (box.y - box.x), 0.0, 1.0);
     float top = crv(e, true, u), bot = crv(e, false, u);
     vec2 lids = eyeLids(e, u, top, bot);
-    float v = clamp((p.y - top) / max(bot - top, 1.0), 0.0, 1.0);
-    float w = sqrt(4.0 * u * (1.0 - u)) * sqrt(4.0 * v * (1.0 - v));
-    vec4 c = texAt(p - vec2(st.z, st.w) * w);
+    vec2 at = p;
+    if (kind == 0) {
+      float v = clamp((p.y - top) / max(bot - top, 1.0), 0.0, 1.0);
+      float w = sqrt(4.0 * u * (1.0 - u)) * sqrt(4.0 * v * (1.0 - v));
+      at = p - vec2(st.z, st.w) * w;
+    }
+    vec4 c = texAt(at);
       // the lash covers ~2px of the ball's upper edge, so the cut can sit under it (no seam)
-    return c * smoothstep(lids.x - 1.0, lids.x + 0.5, p.y) * (1.0 - smoothstep(lids.y - 0.9, lids.y + 0.6, p.y));
+    return c * smoothstep(lids.x - 1.0 - rim, lids.x + 0.5 - rim, q.y) * (1.0 - smoothstep(lids.y - 0.9 + rim, lids.y + 0.6 + rim, q.y));
   }
 
   vec4 mouth(vec2 p, vec4 base) {
@@ -145,11 +159,12 @@ export function createRenderer(engine, rig) {
       float blush = exp(-dot((p - uCheeks.xy) / vec2(48.0, 22.0), (p - uCheeks.xy) / vec2(48.0, 22.0)))
                   + exp(-dot((p - uCheeks.zw) / vec2(40.0, 20.0), (p - uCheeks.zw) / vec2(40.0, 20.0)));
       c.rgb = mix(c.rgb, c.rgb * vec3(1.0, 0.62, 0.64) , clamp(blush * uCheek * 0.55, 0.0, 1.0) * c.a);
-    } else if (uFace >= 4) {
+    } else if (uFace == 4 || uFace == 5) {
       materialUv = halfEyeUv(uFace - 4, p);
       c = texture(uTex, materialUv);
     } else if (uFace >= 2) {
-      c = eyeBall(uFace - 2, p);
+      int kind = uFace >= 8 ? 2 : (uFace >= 6 ? 1 : 0);
+      c = eyeLayer(uFace - (kind == 2 ? 8 : (kind == 1 ? 6 : 2)), p, kind);
     } else {
       c = texAt(p);
     }
@@ -331,6 +346,8 @@ export function createRenderer(engine, rig) {
       let faceMode = opts.face ? 1 : 0;
       if (opts.eyeBall !== undefined) faceMode = 2 + opts.eyeBall;
       if (opts.halfEye !== undefined) faceMode = 4 + opts.halfEye;
+      if (opts.eyeWhite !== undefined) faceMode = 6 + opts.eyeWhite;
+      if (opts.eyeIris !== undefined) faceMode = 8 + opts.eyeIris;
       const layer = { name, image: img, mesh, tex: this.texture(img), vao, posBuf, uvBuf, triBuf, lineBuf, visible: true, faceMode, color: opts.color || [1, 1, 1, 1] };
       this.layers.push(layer);
       return layer;
@@ -434,6 +451,7 @@ export function createRenderer(engine, rig) {
       gl.uniform1fv(m.u.uEyeTop, EYES.flatMap(e => e.top));
       gl.uniform1fv(m.u.uEyeBot, EYES.flatMap(e => e.bot));
       gl.uniform4fv(m.u.uEyeState, state.eyes);
+      gl.uniform2f(m.u.uEyeRim, state.eyeRim?.[0] ?? 0, state.eyeRim?.[1] ?? 0);
       gl.uniform4f(m.u.uMouth, MOUTH.cx, MOUTH.cy, MOUTH.angle, MOUTH.halfLen);
       gl.uniform4f(m.u.uMouthState, state.mouthOpen, state.mouthForm, MOUTH.bow, 0);
       gl.uniform4f(m.u.uCheeks, CHEEKS[0][0], CHEEKS[0][1], CHEEKS[1][0], CHEEKS[1][1]);

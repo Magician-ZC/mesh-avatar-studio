@@ -608,5 +608,213 @@ class HeadLayersTest(unittest.TestCase):
         self.assertFalse({"face_field", "hair_front", "face_skin"} & set(self.meta()["layers"]))
 
 
+class IrisLayersTest(unittest.TestCase):
+    """eyes[i].iris: the eye white without its iris and the iris as a sprite (tools/eye/iris.py)."""
+
+    SKIN = (236, 200, 180)
+    WHITE = (246, 244, 240)
+    RING = (44, 28, 22)
+    IRIS = (128, 86, 62)
+    PUPIL = (20, 12, 10)
+    LASH = (40, 26, 22)
+    SIZE = (360, 300)
+    CENTRES = ((120, 150), (240, 150))
+    HALF = (34, 13)  # the opening: half its width and half its height
+    RADIUS = 17  # the iris is taller than the opening, so both lids cut it
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.project = Path(self.temporary.name)
+        w, h = self.SIZE
+        scale = 4  # drawn four times as large and averaged down, so edges are soft as in a real picture
+        yy, xx = (np.mgrid[0 : h * scale, 0 : w * scale].astype(np.float32) + 0.5) / scale
+        picture = np.empty((h * scale, w * scale, 3), np.float32)
+        picture[:] = self.SKIN
+        a, b = self.HALF
+        for cx, cy in self.CENTRES:
+            reach = b * np.clip(1 - ((xx - cx) / a) ** 2, 0, None)
+            inside = (np.abs(xx - cx) < a) & (np.abs(yy - cy) < reach)
+            r = np.hypot(xx - cx, yy - cy)
+            eye = np.empty_like(picture)
+            eye[:] = self.WHITE
+            eye[yy < cy - reach + 2.5] = (214, 204, 200)  # the lid's shadow on the eye
+            eye[r < self.RADIUS] = self.RING
+            eye[r < self.RADIUS - 3] = self.IRIS
+            eye[r < 6] = self.PUPIL
+            eye[np.hypot(xx - cx - 5, yy - cy + 5) < 2.5] = (255, 255, 255)
+            picture[inside] = eye[inside]
+            picture[(np.abs(xx - cx) < a + 2) & (yy <= cy - reach) & (yy > cy - reach - 3)] = self.LASH
+        picture[(np.abs(xx - 180) < 22) & (np.abs(yy - 232) < 1.5)] = (170, 80, 80)
+        small = picture.reshape(h, scale, w, scale, 3).mean((1, 3))
+        self.source = np.dstack([np.rint(small), np.full((h, w), 255)]).astype(np.uint8)
+        Image.fromarray(self.source).save(self.project / "source.png")
+        rig = json.loads((ROOT / "samples/miko-qipao/rig.json").read_text())
+        for key in ("hand", "buns", "accessories", "strands"):
+            rig.pop(key, None)
+        rig["image"] = {"width": w, "height": h}
+        rig["head"].update(cx=180, cy=150, rx=150, ry=140)
+        rig["face"] = {
+            "nose": {"cx": 180, "cy": 195, "rx": 16, "ry": 16}, "mouth": {"cx": 180, "cy": 232, "rx": 30, "ry": 14},
+            "eyeA": {"cx": 120, "cy": 150, "rx": 44, "ry": 26}, "eyeB": {"cx": 240, "cy": 150, "rx": 44, "ry": 26},
+            "earR": {"cx": 330, "cy": 160, "rx": 12, "ry": 22}, "earL": {"cx": 30, "cy": 160, "rx": 12, "ry": 22},
+            "brow": {"cx": 180, "cy": 110, "rx": 90, "ry": 8, "band": [118, 126]}, "jaw": {"cx": 180, "cy": 262, "rx": 50, "ry": 20, "band": [246, 256]},
+        }
+        rig["mouth"].update(cx=180, cy=232, angle=0, halfLen=20, bow=0)
+        rig["mouth"]["area"] = {"cx": 180, "cy": 234, "rx": 30, "ry": 14, "angle": 0}
+        rig["cheeks"] = [[110, 200], [250, 200]]
+        rig["mesh"]["fine"] = {"x0": 40, "x1": 320, "y0": 60, "y1": 270, "cell": 7}
+        rig["eyes"] = []
+        for cx, cy in self.CENTRES:
+            xs = np.linspace(cx - a, cx + a, 11)
+            arc = b * (1 - ((xs - cx) / a) ** 2)
+            opening = [[float(x), float(cy - d)] for x, d in zip(xs, arc)] + [[float(x), float(cy + d)] for x, d in zip(xs[-2:0:-1], arc[-2:0:-1])]
+            rig["eyes"].append({
+                "opening": opening,
+                "roi": [[cx - a - 10, cy - b - 12], [cx + a + 10, cy - b - 12], [cx + a + 10, cy + b + 8], [cx - a - 10, cy + b + 8]],
+            })
+        self.rig = rig
+
+    def iris(self, eye, **changes):
+        cx, cy = self.CENTRES[eye]
+        return {"cx": cx, "cy": cy, "rx": self.RADIUS, "ry": self.RADIUS, **changes}
+
+    def build(self, irises, *options):
+        rig = copy.deepcopy(self.rig)
+        for eye, iris in irises.items():
+            rig["eyes"][eye]["iris"] = iris
+        (self.project / "rig.draft.json").write_text(json.dumps(rig))
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), str(self.project), "--rig", "rig.draft.json", *options],
+            capture_output=True, text=True, check=False,
+        )
+
+    def meta(self):
+        return json.loads((self.project / "built/layers.json").read_text())
+
+    def layer(self, name):
+        """A built layer at the source's size (transparent outside its rectangle)."""
+        w, h = self.SIZE
+        x, y, lw, lh = self.meta()["layers"][name]
+        full = np.zeros((h, w, 4), np.uint8)
+        with Image.open(self.project / f"built/{name}.png") as image:
+            pixels = np.array(image.convert("RGBA"))
+        self.assertEqual(pixels.shape[:2], (lh, lw))
+        full[y : y + lh, x : x + lw] = pixels
+        return full
+
+    def drawn(self, eye, margin=0):
+        """The pixels the runtime draws fully from the eye layers at rest."""
+        w, h = self.SIZE
+        return builder.ball_inside((h, w), self.meta()["eyes"][eye], margin)
+
+    def test_an_eye_with_an_iris_gets_a_white_without_it_and_the_iris_as_a_whole_disc(self):
+        result = self.build({0: self.iris(0), 1: self.iris(1)}, "--open-eyes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("iris layers left out", result.stderr)
+        meta = self.meta()
+        self.assertEqual(len(meta["iris"]), 2)
+        luma = lambda rgb: rgb[..., :3].astype(np.float32) @ np.float32([0.299, 0.587, 0.114])
+        yy, xx = np.mgrid[0 : self.SIZE[1], 0 : self.SIZE[0]]
+        for eye, (cx, cy) in enumerate(self.CENTRES):
+            for part in ("ball", "white", "iris", "lash", "low", "crease", "open"):
+                self.assertIn(f"eye{eye}_{part}", meta["layers"])
+            white, iris, drawn = self.layer(f"eye{eye}_white"), self.layer(f"eye{eye}_iris"), self.drawn(eye)
+            r = np.hypot(xx + 0.5 - cx, yy + 0.5 - cy)
+            # nothing of the iris is left in the white: where the iris was it is as light as the white beside it
+            inner = self.drawn(eye, 2)
+            where = inner & (r < self.RADIUS + 1)
+            self.assertTrue((white[..., 3][drawn] == 255).all())
+            self.assertGreater(float(luma(white)[where].min()), 185)
+            beside = inner & (r > self.RADIUS + 6)
+            self.assertLess(abs(float(np.median(luma(white)[where])) - float(np.median(luma(white)[beside]))), 12)
+            # ... and along the upper lid it is shaded like the white beside it, not bright up to the lash line
+            rim = drawn & ~self.drawn(eye, 1) & (yy < cy)
+            self.assertLess(abs(float(np.median(luma(white)[rim & (r < self.RADIUS - 4)])) - float(np.median(luma(white)[rim & (r > self.RADIUS + 6)]))), 30)
+            # the white reaches beyond the opening, so the soft lid clip never shows the skin under it
+            self.assertEqual(int(white[cy - self.HALF[1] - 2, cx, 3]), 255)
+            # the iris is the whole disc: its ring carries on under both lids, and no more than the iris
+            for dy in (-(self.RADIUS - 1.5), self.RADIUS - 1.5):
+                x, y = int(cx), int(cy + dy)
+                self.assertFalse(bool(drawn[y, x]))  # hidden by a lid in the picture
+                self.assertGreater(int(iris[y, x, 3]), 200)
+                self.assertLess(float(luma(iris)[y, x]), 90)  # the dark ring
+            self.assertEqual(int(iris[cy, cx, 3]), 255)
+            self.assertLess(float(luma(iris)[cy, cx]), 40)  # the pupil
+            self.assertEqual(int(iris[int(cy - self.RADIUS - 5), cx, 3]), 0)
+            self.assertEqual(int(iris[cy, int(cx + self.RADIUS + 8), 3]), 0)
+            # over each other, with the open-eye layer over both, they are the picture again where the runtime
+            # draws them fully: also along the lids, where the lid's share of each pixel went to the open-eye layer
+            def over(below, above):
+                a = above[..., 3:4].astype(np.float32) / 255
+                return below * (1 - a) + above[..., :3] * a
+
+            composed = over(over(white[..., :3].astype(np.float32), iris), self.layer(f"eye{eye}_open"))
+            error = np.abs(composed - self.source[..., :3]).max(-1)
+            self.assertLessEqual(float(error[inner].max()), 1)
+            self.assertLessEqual(float(error[drawn].max()), 24)
+            self.assertLess(float(error[drawn].mean()), 0.5)
+            self.assertLess(meta["iris"][eye]["rest"]["mean"], 0.5)
+            self.assertGreater(meta["iris"][eye]["continued"], 100)
+            # the eye ball of older runtimes is as before
+            ball = self.layer(f"eye{eye}_ball")
+            self.assertTrue((ball[drawn][:, :3] == self.source[drawn][:, :3]).all())
+
+    def test_the_open_eye_layer_of_an_iris_eye_keeps_no_strip_of_the_iris(self):
+        result = self.build({0: self.iris(0)}, "--open-eyes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        meta = self.meta()
+        self.assertEqual([entry is None for entry in meta["iris"]], [False, True])
+        self.assertFalse({"eye1_white", "eye1_iris"} & set(meta["layers"]))
+        with_iris, without = self.layer("eye0_open"), self.layer("eye1_open")
+        # the hole is everything the eye layers draw fully. Nothing of the picture stays in it: along the lids
+        # only the lid's own share of the pixels it blends into, in the lid's colour, never the iris's
+        drawn = self.drawn(0)
+        self.assertFalse((with_iris[..., 3][self.drawn(0, 2)] > 0).any())
+        lid = drawn & (with_iris[..., 3] > 0)
+        self.assertGreater(int(lid.sum()), 8)
+        self.assertLess(int(with_iris[..., 3][lid].max()), 255)
+        yy = np.mgrid[0 : self.SIZE[1], 0 : self.SIZE[0]][0]
+        lower = with_iris[lid & (yy > self.CENTRES[0][1])][:, :3].astype(np.float32)
+        self.assertGreater(len(lower), 4)
+        self.assertLess(float(np.abs(lower - np.float32(self.SKIN)).max()), 12)  # the lower lid is skin
+        upper = with_iris[lid & (yy < self.CENTRES[0][1])][:, :3].astype(np.float32)
+        self.assertLess(float(np.abs(upper - np.float32(self.LASH)).max()) if len(upper) else 0.0, 12)  # the upper one the lash
+        self.assertTrue((with_iris[..., 3][~drawn & self.drawn(0, -3)] == 255).all())
+        # an eye without iris layers keeps its rim, as before
+        rim = self.drawn(1) & ~self.drawn(1, 1)
+        self.assertTrue((without[..., 3][rim] == 255).all())
+        top = self.CENTRES[1][1] - self.HALF[1]
+        self.assertEqual(int(without[top + 1, self.CENTRES[1][0], 3]), 255)
+        self.assertEqual(int(with_iris[top + 3, self.CENTRES[0][0], 3]), 0)
+        self.assertEqual(int(with_iris[top - 2, self.CENTRES[0][0], 3]), 255)  # the lash line stays
+
+    def test_an_eye_that_cannot_be_split_is_cut_as_before_and_says_why(self):
+        cases = [
+            (self.iris(0, cx=180, cy=232), "the iris outline is not on this eye"),
+            (self.iris(0, rx=40, ry=40), "no eye white beside the iris"),
+        ]
+        plain = self.build({})
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        ball = (self.project / "built/eye0_ball.png").read_bytes()
+        for iris, reason in cases:
+            result = self.build({0: iris})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"iris layers left out: eye 0: {reason}", result.stderr)
+            meta = self.meta()
+            self.assertNotIn("iris", meta)
+            self.assertFalse({"eye0_white", "eye0_iris"} & set(meta["layers"]))
+            self.assertEqual((self.project / "built/eye0_ball.png").read_bytes(), ball)
+
+    def test_a_malformed_iris_fails_without_replacing_existing_output(self):
+        self.assertEqual(self.build({}).returncode, 0)
+        before = (self.project / "built/layers.json").read_bytes()
+        for iris in ({"cx": 120, "cy": 150, "rx": 0, "ry": 17}, {"cx": 120, "cy": 150, "rx": 17}, {"cx": -5, "cy": 150, "rx": 17, "ry": 17}, [120, 150, 17, 17]):
+            result = self.build({0: iris})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("eyes[0].iris", result.stderr)
+            self.assertEqual((self.project / "built/layers.json").read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()
