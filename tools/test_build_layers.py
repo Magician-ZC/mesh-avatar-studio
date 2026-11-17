@@ -669,6 +669,32 @@ class HeadLayersTest(unittest.TestCase):
         self.assertEqual(int(hair[119, 121, 3]), 255)
         self.assertLess(self.meta()["head"]["restMean"], 1.0)
 
+    def test_an_eyeliner_tail_drawn_over_a_lock_by_the_eye_goes_onto_the_hair_layer(self):
+        # a lock right beside the left eye, with the eyeliner's tail drawn across it - in the plate the same tail lies
+        # on the skin. Left out of the hair, the tail would leave a notch through which the turning or closing face shows
+        tail = (30, 22, 20, 255)
+        with Image.open(self.project / "source.png") as image:
+            source = image.convert("RGBA")
+        draw = ImageDraw.Draw(source)
+        draw.rectangle((96, 172, 105, 212), fill=self.HAIR)
+        draw.rectangle((93, 185, 109, 187), fill=tail)
+        source.save(self.project / "source.png")
+        with Image.open(self.footprint_path) as image:
+            footprint = image.convert("L")
+        ImageDraw.Draw(footprint).rectangle((96, 172, 105, 212), fill=255)
+        footprint.save(self.footprint_path)
+        plate = self.plate.copy()
+        ImageDraw.Draw(plate).rectangle((93, 185, 109, 187), fill=tail)
+        plate.save(self.plate_path)
+        result = self.run_cli("--open-eyes", "--head-plate", str(self.plate_path), "--head-footprint", str(self.footprint_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("left out", result.stderr)
+        hair = self.layer("hair_front")
+        for x in (98, 101, 104):
+            self.assertEqual(hair[186, x].tolist(), list(tail), x)  # the tail, as drawn, on the lock
+        self.assertEqual(int(hair[190, 120, 3]), 0)  # the eye is not hair
+        self.assertLess(self.meta()["head"]["restMean"], 1.0)
+
     def test_a_plate_that_is_no_plate_leaves_the_head_layers_out_and_says_why(self):
         # the "plate" still has the hair: nothing can be lifted
         with Image.open(self.project / "source.png") as image:

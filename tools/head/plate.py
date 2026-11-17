@@ -39,6 +39,8 @@ BROW = 4  # px: by the brow, a pixel the plate shows this close by is the brow d
 BESIDE = 1.5  # px (blur sigma): the solid hair whose colour a soft hair pixel by the eyes takes
 HOLE = 48  # px: a hole in the hair on the footprint up to this size is hair
 TIPS = 400  # px: by the brow, a hole in the hair up to this size holds strand tips the footprint left out
+POCKET = 11  # px: by the eyes, a pocket in the hair this narrow is an eye line drawn over the hair
+OPENING = 3  # px around an eye's opening where no pocket is filled
 
 
 def _blur(image, sigma):
@@ -186,6 +188,18 @@ def matte(source_rgb, plate_rgb, footprint, valid, features=None, eyes=None):
     kept = np.unique(labels[anchor])
     alpha[~np.isin(labels, kept[kept != 0])] = 0
     return alpha.astype(np.float32), hair, None
+
+
+def pockets(alpha, eyes, footprint, openings):
+    """Eye lines drawn over the hair (an eyeliner's tail across a lock): the plate draws the same line there, so the
+    matte leaves a pocket in the hair, and the face moving under the hair would show through it - the tail doubles when
+    the face turns, and the closed eye leaves a notch of skin in the hair. The pockets of the hair by the eyes (eyes) that
+    a closing of POCKET px fills, on the footprint and outside the eyes' openings (grown by OPENING px), go onto the hair
+    layer as drawn."""
+    solid = (alpha >= 0.5).astype(np.uint8)
+    closed = cv2.morphologyEx(solid, cv2.MORPH_CLOSE, np.ones((POCKET, POCKET), np.uint8)) > 0
+    grown = cv2.dilate(openings.astype(np.uint8), np.ones((2 * OPENING + 1, 2 * OPENING + 1), np.uint8)) > 0
+    return closed & (solid == 0) & eyes & footprint & ~grown
 
 
 def lift(source, plate_rgb, alpha, hair_colour, moving, valid, features=None, eyes=None):
@@ -352,6 +366,11 @@ def cut(source, rig, plate_rgba, footprint, frame_of, field_of, moving_floor, ou
     alpha, hair_colour, reason = matte(np.ascontiguousarray(source[..., :3]), plate_rgb, footprint.astype(np.float32) / 255, valid, features, eyes)
     if alpha is None:
         return None, reason
+    openings = np.zeros(shape, np.uint8)
+    for eye in rig["eyes"]:
+        if eye.get("opening"):
+            cv2.fillPoly(openings, [np.array(eye["opening"], np.int32)], 1)
+    alpha[pockets(alpha, eyes, footprint > 128, openings > 0)] = 1
     hair, under, weight = lift(source, plate_rgb, alpha, hair_colour, moving, valid, features, eyes)
     lifted = float(((hair[..., 3] > 0) & moving).sum() / max(1, int(moving.sum())))
     if lifted < MIN_LIFTED:
