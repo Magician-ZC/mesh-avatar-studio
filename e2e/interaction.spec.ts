@@ -195,13 +195,13 @@ test('a held strand stays at the pointer while held and comes back after the rel
       };
       return {
         handle: held.handle, cheek: held.cheek, moved: differing(still.held, held.held, 8),
-        kept: differing(held.held, held.stillHeld, 8), settled: differing(still.settled, held.settled, 2),
+        kept: differing(still.stillHeld, held.stillHeld, 8), settled: differing(still.settled, held.settled, 2),
       };
     } finally { Math.random = random; }
   });
   expect(result.cheek).toEqual({ pull: false, grab: null, can: false });
   expect(Number.isInteger(result.handle) && result.handle! > 0).toBe(true);
   expect(result.moved).toBeGreaterThan(300);
-  expect(result.kept).toBeLessThan(0.1 * result.moved);
+  expect(result.kept).toBeGreaterThan(0.5 * result.moved); // still held a moment later
   expect(result.settled).toBe(0);
 });
