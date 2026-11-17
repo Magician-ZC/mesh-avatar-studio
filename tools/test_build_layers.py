@@ -695,6 +695,28 @@ class HeadLayersTest(unittest.TestCase):
         self.assertEqual(int(hair[190, 120, 3]), 0)  # the eye is not hair
         self.assertLess(self.meta()["head"]["restMean"], 1.0)
 
+    def test_a_soft_pixel_no_hair_colour_gives_back_keeps_the_source_below_away_from_the_eyes_too(self):
+        # beside the left lock, below the eye's zone, a patch the matte reads as a fifth of hair over the plate's skin but
+        # off that line in hue (as skin beside a lock over a plate drawn darker there): no colour a hair can have gives it
+        # back, so it is no hair and the source stays below - not a stand-in colour in the resting picture
+        patch = (199, 217, 95, 255)
+        with Image.open(self.project / "source.png") as image:
+            source = image.convert("RGBA")
+        ImageDraw.Draw(source).rectangle((97, 228, 99, 232), fill=patch)
+        source.save(self.project / "source.png")
+        result = self.run_cli("--open-eyes", "--head-plate", str(self.plate_path), "--head-footprint", str(self.footprint_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("left out", result.stderr)
+        source = np.array(Image.open(self.project / "source.png").convert("RGBA"))
+        hair, skin = self.layer("hair_front"), self.layer("face_skin")
+        rest = self.over(self.over(source, skin), hair)
+        for y in (228, 230, 232):
+            for x in (97, 98, 99):
+                self.assertEqual(int(hair[y, x, 3]), 0, (x, y))
+                self.assertLessEqual(float(np.abs(rest[y, x, :3] - source[y, x, :3]).max()), 1.0, (x, y))
+        self.assertEqual(hair[200, 80].tolist(), list(self.HAIR))  # the lock itself is still hair
+        self.assertLess(self.meta()["head"]["restMean"], 1.0)
+
     def test_a_plate_that_is_no_plate_leaves_the_head_layers_out_and_says_why(self):
         # the "plate" still has the hair: nothing can be lifted
         with Image.open(self.project / "source.png") as image:

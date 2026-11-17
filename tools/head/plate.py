@@ -210,7 +210,8 @@ def lift(source, plate_rgb, alpha, hair_colour, moving, valid, features=None, ey
     the source: the hair layer fades in over the outermost FADE px of its reach, where the layer below is still the
     source itself (hair on its own hair); only further in, where the hair layer is complete, does the layer below
     become the plate. Solid hair pixels reproduce the source exactly, soft ones as closely as a colour hair can have
-    allows. The plate never hides what the matte did not lift: such a pixel is lifted after all where it is hair, and
+    allows, and one that no hair colour gives back to within EDGE keeps the source below instead (no hair there). The
+    plate never hides what the matte did not lift: such a pixel is lifted after all where it is hair, and
     keeps the source below where it is not, and by the eyes (features: where only hair on the footprint is lifted, and a
     lash put on the hair layer would stay behind when the face turns). eyes: the part of features around the eyes
     (default all); by the brow (the rest), strand tips in a hole of the hair are lifted unless the plate explains them.
@@ -293,11 +294,12 @@ def lift(source, plate_rgb, alpha, hair_colour, moving, valid, features=None, ey
         edge &= fits
         colour = np.where(edge[..., None], local, colour)
         a = np.where(edge, refit, a)
-    # by the eyes, a soft pixel that no hair colour and alpha give back (a highlight lighter than both sides, another hue)
-    # is left to the source: no hair there, the source below - a speck that moves with the face rather than a wrong
-    # colour in the resting picture next to the eye
+    # a soft pixel of the matte that no hair colour and alpha give back (a highlight lighter than both sides, another hue,
+    # skin beside the hair over a plate drawn darker there) is left to the source: no hair there, the source below - a
+    # speck that moves with the face rather than a wrong colour in the resting picture, by the eyes and anywhere else.
+    # Its alpha may have been solved up to 1 against a stand-in colour above, so it counts whatever its alpha is now.
     drawn = under_drawn * (1 - a[..., None]) + colour * a[..., None]
-    off = near_eyes & (alpha > 0) & (a < 0.999) & (np.abs(drawn - src).max(-1) > EDGE)
+    off = (alpha > 0) & (alpha < 0.999) & (np.abs(drawn - src).max(-1) > EDGE)
     if np.any(off):
         a = np.where(off, 0.0, a)
         weight = np.where(off, 0.0, weight)
