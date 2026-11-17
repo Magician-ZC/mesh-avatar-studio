@@ -179,6 +179,9 @@ def polygon_mask(shape, poly):
 
 
 def accessory_mask(rgba, accessory):
+    if accessory.get("outline") is not None:
+        # an outline (a keyhole polygon may leave a hole out) cuts the accessory whatever its colour
+        return polygon_mask(rgba.shape[:2], accessory["outline"]) & np.where(rgba[..., 3] > 0, 255, 0).astype(np.uint8)
     rgb = rgba[..., :3]
     box = accessory["box"]
     x0, y0, x1, y1 = box
@@ -217,6 +220,68 @@ def crop_layer(rgba, mask, pad=4, soft=True):
     ) / 255
     layer[..., 3] = (layer[..., 3].astype(np.float32) * soft).astype(np.uint8)
     return layer[y0:y1, x0:x1], [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+
+
+def smooth_fill(rgb, known):
+    """Colours for the pixels that are not `known`, smoothly from the known ones round them (push-pull: masked averages
+    down an image pyramid, filled back up), without the streaks inpainting draws across a large hole."""
+    levels = [(rgb.astype(np.float32) * known[..., None], known.astype(np.float32))]
+    while min(levels[-1][1].shape) > 8 and levels[-1][1].min() == 0:
+        colour, weight = levels[-1]
+        levels.append((cv2.pyrDown(colour), cv2.pyrDown(weight)))
+    colour, weight = levels[-1]
+    estimate = colour / np.maximum(weight, 1e-6)[..., None]
+    for colour, weight in reversed(levels[:-1]):
+        size = (weight.shape[1], weight.shape[0])
+        estimate = cv2.pyrUp(estimate, dstsize=size)
+        share = np.clip(weight, 0, 1)[..., None]
+        estimate = share * (colour / np.maximum(weight, 1e-6)[..., None]) + (1 - share) * estimate
+    return np.clip(estimate, 0, 255).astype(np.uint8)
+
+
+def behind_front(rgba, region, band, fill, front):
+    """The hem band along an accessory the garment goes on behind (a handbag over a skirt) is not the hem: the garment
+    continues there, so when it swings away from the accessory the base shows its colours, smoothly filled, opaque."""
+    front = front > 0
+    if not np.any(band & cv2.dilate(front.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)):
+        return fill
+    to_front = cv2.distanceTransform((~front).astype(np.uint8), cv2.DIST_L2, 5)
+    to_edge = cv2.distanceTransform((region | front).astype(np.uint8), cv2.DIST_L2, 5)
+    # only where the garment is opaque: under a see-through edge the drawing has nothing behind it at rest
+    along = band & (to_front < to_edge) & (rgba[..., 3] == 255)
+    if not np.any(along):
+        return fill
+    ys, xs = np.nonzero(along)
+    h, w = along.shape
+    pad = 64
+    window = (slice(max(0, ys.min() - pad), min(h, ys.max() + pad + 1)), slice(max(0, xs.min() - pad), min(w, xs.max() + pad + 1)))
+    known = region[window] & ~band[window] & (rgba[window][..., 3] > 128)
+    colours = smooth_fill(rgba[window][..., :3], known)
+    out = fill.copy()
+    out[window][..., :3][along[window]] = colours[along[window]]
+    out[window][..., 3][along[window]] = 255
+    return out
+
+
+def fill_behind(rgba, base, area):
+    """The base behind accessories cut by an outline (a handbag hanging over a skirt): a smooth fill of the colours of
+    the opaque pixels round them (the background's colour is not used), opaque where the alpha inpainted from round them
+    is at least half - the figure goes on behind there - and transparent where they hung over the background. The small
+    tassels cut by colour keep the fade above."""
+    inside = area > 0
+    ys, xs = np.nonzero(inside)
+    h, w = inside.shape
+    pad = max(64, int(max(ys.max() - ys.min(), xs.max() - xs.min())))
+    y0, y1, x0, x1 = max(0, ys.min() - pad), min(h, ys.max() + pad + 1), max(0, xs.min() - pad), min(w, xs.max() + pad + 1)
+    window = (slice(y0, y1), slice(x0, x1))
+    known = (rgba[window][..., 3] > 128) & ~inside[window]
+    rgb = smooth_fill(rgba[window][..., :3], known)
+    alpha = cv2.inpaint(np.ascontiguousarray(rgba[..., 3]), area, 9, cv2.INPAINT_TELEA)
+    out = base.copy()
+    out[window][..., :3][inside[window]] = rgb[inside[window]]
+    # a soft edge against the background has background behind it (drawn over a fill, it would not be the drawing)
+    out[..., 3][inside] = np.where((alpha[inside] >= 128) & (rgba[..., 3][inside] == 255), 255, 0).astype(np.uint8)
+    return out
 
 
 def inpaint_rgba(rgba, mask):
@@ -551,7 +616,7 @@ def hand_prefill(rgba, remove, hand):
     return prefill, painted
 
 
-def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", legs=None, covered=None, notes=None):
+def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", legs=None, covered=None, notes=None, occluders=None):
     """Cut each garment into its own layer and write base_cloth.png without them.
 
     base.png keeps the garments, so runtimes that do not know rig.cloth still draw them.
@@ -563,7 +628,9 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
     drawn or inpainted under them and source_under.png is never read.
     With cloth_under="hem", the same, except each front garment's hem band (tools/cloth/hem.py): there base_cloth is
     transparent or continues the legs below the hem (`legs`), and the garment layer takes its drawn edge along the band,
-    cut hard. `covered` (hand, accessories) stays out of the band. `notes` receives what each band holds.
+    cut hard. `covered` (hand, accessories) stays out of the band; where the band runs along `occluders` (accessories cut
+    by an outline, which the garment goes on behind) it holds the garment's own colours, smoothly, instead of what is below
+    the hem. `notes` receives what each band holds.
     """
     h, w = rgba.shape[:2]
     shape = (h, w)
@@ -606,6 +673,8 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
                     others |= masks[other["name"]]
             keep_out = (others | taken | (covered if covered is not None else 0)) > 0
             region, band, fill, report = hem_band().band(rgba, mask, cloth, legs, keep_out)
+            if occluders is not None:
+                fill = behind_front(rgba, region, band, fill, occluders)
             mask = region.astype(np.uint8) * 255
             bands.append((band, fill))
             if notes is not None:
@@ -748,6 +817,17 @@ def validate_inputs(rig, rgba):
         colour = accessory["color"]
         if not 0 <= colour["redness"] <= 1 or not 0 <= colour["minRed"] <= 255:
             raise ValueError(f"accessories[{i}].color thresholds are out of range")
+        outline = accessory.get("outline")
+        if outline is not None and (
+            not isinstance(outline, list)
+            or len(outline) < 3
+            or any(
+                not isinstance(p, (list, tuple)) or len(p) != 2
+                or any(not isinstance(n, (int, float)) or not math.isfinite(n) for n in p)
+                for p in outline
+            )
+        ):
+            raise ValueError(f"accessories[{i}].outline must be a polygon of at least three finite points")
     cloth_names = set()
     for i, cloth in enumerate(rig.get("cloth", [])):
         name = cloth["name"]
@@ -878,6 +958,7 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
 
     remove = np.zeros((h, w), np.uint8)
     accessory_bg = np.zeros((h, w), np.uint8)
+    outlined = np.zeros((h, w), np.uint8)  # accessories cut by an outline: what is behind them is filled in
     hand = rig.get("hand")
     if hand is not None:
         mask = polygon_mask((h, w), hand["outline"])
@@ -893,8 +974,14 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
             raise ValueError(
                 f"accessory {accessory['name']}: no pixels match its box and color thresholds"
             )
-        store(accessory["name"], *crop_layer(rgba, mask))
-        accessory_bg |= cv2.dilate(mask, np.ones((5, 5), np.uint8))
+        # cut by an outline: a hard edge, so the accessory and the garment it lies over each draw their own pixels at rest
+        store(accessory["name"], *crop_layer(rgba, mask, soft=accessory.get("outline") is None))
+        if accessory.get("outline") is not None:
+            # exact: the layer has a hard edge, so the base round it stays the drawing
+            accessory_bg |= mask
+            outlined |= mask
+        else:
+            accessory_bg |= cv2.dilate(mask, np.ones((5, 5), np.uint8))
 
     # Head layers from a clean plate: the hair in front of the face is lifted off, and the face without it (`face`) is
     # what the eye layers are cut from. base.png stays the whole picture.
@@ -984,14 +1071,17 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         dist = cv2.distanceTransform(1 - kept, cv2.DIST_L2, 5)
         fade = np.clip(1 - dist / 2.5, 0, 1)
         base[..., 3] = np.where(
-            accessory_bg > 0, (base[..., 3] * fade).astype(np.uint8), base[..., 3]
+            (accessory_bg > 0) & (outlined == 0), (base[..., 3] * fade).astype(np.uint8), base[..., 3]
         )
+        if np.any(outlined):
+            base = fill_behind(rgba, base, outlined)
     images["base"] = base
     images["hairmask"] = hair_mask(rgba, rig, external_hair)
     if rig.get("cloth"):
         legs = read_hairmask(hem_legs, (w, h), "--hem-legs") if hem_legs is not None else None
         hems = {}
-        build_cloth(project, rig, rgba, base, store, images, cloth_under, legs, remove | accessory_bg, hems)
+        build_cloth(project, rig, rgba, base, store, images, cloth_under, legs, remove | accessory_bg, hems,
+                    outlined if np.any(outlined) else None)
         if cloth_under == "hem":
             meta["clothUnder"] = {"mode": "hem", "garments": hems}
     limbs = np.zeros((h, w), np.uint8)

@@ -337,6 +337,42 @@ class BuildLayersTest(unittest.TestCase):
                 else:
                     self.assertNotIn("rounded outward and clipped", result.stdout)
 
+    def test_an_accessory_outline_cuts_it_whatever_its_colour_and_a_keyhole_leaves_its_hole(self):
+        # a cream bag (no red at all) on a strap loop: the outline is a keyhole polygon round the loop's inside
+        outer = [[20, 10], [60, 10], [60, 70], [20, 70]]
+        hole = [[30, 20], [30, 40], [50, 40], [50, 20]]
+        outline = outer[:1] + hole + hole[:1] + outer
+        self.rig["accessories"] = [{"name": "bag", "pivot": [40, 10], "tip": [40, 70], "split": 0.4,
+                                    "box": [20, 10, 61, 71], "color": {"redness": 1, "minRed": 255}, "outline": outline}]
+        with Image.open(self.project / "source.png") as original:
+            image = original.convert("RGBA")
+        ImageDraw.Draw(image).rectangle((20, 10, 60, 70), fill=(235, 225, 210, 255))
+        image.save(self.project / "source.png")
+        rgba = np.array(image)
+        mask = builder.accessory_mask(rgba, self.rig["accessories"][0])
+        self.assertTrue(mask[60, 40] and mask[15, 25])
+        self.assertFalse(mask[30, 40])  # inside the loop
+        self.assertFalse(mask[5, 5])
+        self.draft.write_text(json.dumps(self.rig))
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        layers = json.loads((self.project / "built/layers.json").read_text())
+        self.assertIn("bag", layers["layers"])
+        # a hard edge: at rest the bag and what it lies over each draw their own pixels
+        with Image.open(self.project / "built/bag.png") as layer:
+            self.assertLessEqual(set(np.unique(np.array(layer.convert("RGBA"))[..., 3]).tolist()), {0, 255})
+        # behind it the base is filled in from round it, not left with a copy of the bag
+        with Image.open(self.project / "built/base.png") as base:
+            behind = np.array(base.convert("RGBA"))[15:65, 25:55]
+        self.assertFalse(((np.abs(behind[..., :3].astype(int) - (235, 225, 210)).max(axis=-1) < 3) & (behind[..., 3] > 0)).all())
+        for bad in ([[20, 10], [60, 10]], [[20, 10], [60, float("nan")], [20, 70]]):
+            with self.subTest(outline=bad):
+                self.rig["accessories"][0]["outline"] = bad
+                self.draft.write_text(json.dumps(self.rig))
+                result = self.run_cli()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("accessories[0].outline", result.stderr)
+
     def test_collapsed_or_nonfinite_boxes_fail_without_replacing_output(self):
         (self.project / "rig.json").write_text("existing rig")
         (self.project / "built").mkdir()
@@ -952,6 +988,28 @@ class HemBandTest(unittest.TestCase):
         self.assertEqual(int(bare[y, edge, 3]), 0)
         self.assertEqual(int(garment[self.WAIST + 1, 100, 3]), 0)
         self.assertEqual(bare[self.WAIST + 1, 100].tolist(), base[self.WAIST + 1, 100].tolist())
+
+    def test_along_an_accessory_lying_over_the_skirt_the_band_holds_the_skirt(self):
+        # a bag over the skirt's left side near the hem, cut by an outline; the skirt is traced without it
+        bag = [[20, 170], [70, 170], [70, 205], [20, 205]]
+        image = Image.fromarray(self.source)
+        ImageDraw.Draw(image).rectangle((20, 170, 70, 205), fill=(240, 232, 220, 255))
+        image.save(self.project / "source.png")
+        self.rig["accessories"] = [{"name": "bag", "pivot": [60, 120], "tip": [45, 205], "split": 0.6,
+                                    "box": [20, 170, 71, 206], "color": {"redness": 1, "minRed": 255}, "outline": bag}]
+        self.rig["cloth"][0]["outline"] = [[64, self.WAIST + 3], [136, self.WAIST + 3], [158, self.HEM - 5], [100, self.HEM - 5],
+                                           [72, self.HEM - 5], [72, 168], [52, 168]]
+        result = self.build("--cloth-under", "hem", travel=16)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bare = self.image("base_cloth")
+        # next to the bag (the skirt goes on behind it) the band is the skirt's colour, opaque ...
+        self.assertEqual(int(bare[190, 74, 3]), 255)
+        self.assertLess(np.abs(bare[190, 74, :3].astype(int) - self.SKIRT[:3]).max(), 40)
+        # ... behind the bag, where the skirt went on, the base is opaque, where it hung over the background, transparent
+        self.assertEqual(int(bare[200, 66, 3]), 255)
+        self.assertEqual(int(bare[175, 24, 3]), 0)
+        # the band along the skirt's own hem stays transparent
+        self.assertEqual(int(bare[self.HEM - 6, 140, 3]), 0)
 
     def test_without_legs_the_band_is_transparent_and_it_is_as_deep_as_the_travel_allows(self):
         counts = {}

@@ -118,6 +118,7 @@ the engine mapping. Do not copy the example illustration's coordinates into a ne
 | `accessories[*].box` | Integer `[x0,y0,x1,y1]` search rectangle, px; tightly bound accessory, x1/y1 exclusive. |
 | `accessories[*].color.redness` | Minimum `(R-max(G,B))/max(R,1)` ratio, 0–1; builder currently isolates red accessories only. |
 | `accessories[*].color.minRed` | Minimum red channel, 0–255; suppress dark background inside box. |
+| `accessories[*].outline` | Optional polygon `[x,y]` points, px; when given, the builder cuts the accessory from it (any colour) instead of by `color`. A keyhole polygon (a slit to an inner loop) leaves a hole out. |
 | `hand.outline` | Polygon `[x,y]` points, px; trace the entire visible hand/forearm to cut out. |
 | `hand.jaw` | Visible jaw polyline `[x,y]`, px; sample both sides of the hand occlusion for interpolation. |
 | `hand.jawRange` | Increasing x range, px; jaw segment to reconstruct behind hand. |
