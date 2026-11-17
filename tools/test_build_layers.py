@@ -636,6 +636,39 @@ class HeadLayersTest(unittest.TestCase):
         meta = json.loads((self.project / "built/layers.json").read_text())
         self.assertLess(meta["head"]["restMean"], 1.0)
 
+    def test_strand_tips_in_a_hole_of_the_footprint_by_the_brow_are_hair_and_the_brow_seen_through_the_hair_is_not(self):
+        # the footprint leaves two holes in the fringe by the brow: in one the source has strands (hair the plate's maker
+        # left out), in the other the brow, which the plate draws a pixel higher; and the fringe has a small highlight
+        # lighter than the plate under it, away from the brow
+        brow = (120, 84, 70, 255)
+        with Image.open(self.project / "source.png") as image:
+            source = image.convert("RGBA")
+        draw = ImageDraw.Draw(source)
+        draw.rectangle((150, 150, 157, 163), fill=(70, 48, 40, 255))
+        draw.rectangle((200, 152, 207, 157), fill=brow)
+        draw.rectangle((120, 118, 123, 121), fill=(200, 170, 150, 255))
+        source.save(self.project / "source.png")
+        with Image.open(self.footprint_path) as image:
+            footprint = image.convert("L")
+        for box in ((150, 150, 157, 163), (200, 152, 207, 157)):
+            ImageDraw.Draw(footprint).rectangle(box, fill=0)
+        footprint.save(self.footprint_path)
+        plate = self.plate.copy()
+        ImageDraw.Draw(plate).rectangle((196, 151, 211, 156), fill=brow)
+        plate.save(self.plate_path)
+        result = self.run_cli("--open-eyes", "--head-plate", str(self.plate_path), "--head-footprint", str(self.footprint_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("left out", result.stderr)
+        hair, skin = self.layer("hair_front"), self.layer("face_skin")
+        # the strands stay with the hair, with the plate under them; they do not slide with the face
+        self.assertGreater(int(hair[156, 153, 3]), 200)
+        self.assertGreater(int(skin[156, 153, 3]), 200)
+        # the brow does
+        self.assertEqual(int(hair[154, 203, 3]), 0)
+        # the highlight is hair: the face does not show through the fringe there once it has turned
+        self.assertEqual(int(hair[119, 121, 3]), 255)
+        self.assertLess(self.meta()["head"]["restMean"], 1.0)
+
     def test_a_plate_that_is_no_plate_leaves_the_head_layers_out_and_says_why(self):
         # the "plate" still has the hair: nothing can be lifted
         with Image.open(self.project / "source.png") as image:
