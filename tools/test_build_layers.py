@@ -1119,6 +1119,36 @@ class HemBandTest(unittest.TestCase):
         # the band along the skirt's own hem stays transparent
         self.assertEqual(int(bare[self.HEM - 6, 140, 3]), 0)
 
+    def test_behind_an_accessory_over_a_tiered_skirt_the_tiers_go_on(self):
+        # a wide skirt in tiers (bands of two colours) and a bag over its left part, cut by an outline; the skirt is
+        # traced without the bag
+        image = Image.fromarray(self.source)
+        draw = ImageDraw.Draw(image)
+        tiers = [(200, 120, 140, 255), (120, 150, 210, 255)]
+        for y in range(110, 221):
+            draw.line((10, y, 190, y), fill=tiers[(y - 110) // 9 % 2])
+        draw.rectangle((14, 150, 64, 200), fill=(240, 232, 220, 255), outline=(60, 40, 30, 255), width=2)
+        image.save(self.project / "source.png")
+        self.rig["accessories"] = [{"name": "bag", "pivot": [40, 120], "tip": [40, 200], "split": 0.4,
+                                    "box": [14, 150, 65, 201], "color": {"redness": 1, "minRed": 255},
+                                    "outline": [[14, 150], [64, 150], [64, 200], [14, 200]]}]
+        self.rig["cloth"][0]["outline"] = [[12, 112], [188, 112], [188, 217], [12, 217], [12, 203], [67, 203],
+                                           [67, 147], [12, 147]]
+        self.rig["cloth"][0]["waist"] = [[12, 112], [188, 112]]
+        self.rig["cloth"][0]["hem"] = [[12, 217], [100, 217], [188, 217]]
+        result = self.build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        base = self.image("base")
+        behind = base[156:195, 20:59]
+        # the skirt goes on behind the bag, opaque, and nothing of the bag stays
+        self.assertTrue((behind[..., 3] == 255).all())
+        self.assertFalse((np.abs(behind[..., :3].astype(int) - (240, 232, 220)).max(axis=-1) < 12).any())
+        # row by row it is the tier of that row, as beside the bag: the tiers go on, not one smooth colour
+        rows = np.median(behind[..., :3].astype(int), axis=1)
+        beside = np.median(base[156:195, 100:180, :3].astype(int), axis=1)
+        self.assertGreater(float((np.abs(rows - beside).max(axis=1) < 30).mean()), 0.85)
+        self.assertGreater(float(rows.std(axis=0).max()), 25)
+
     def test_without_legs_the_band_is_transparent_and_it_is_as_deep_as_the_travel_allows(self):
         counts = {}
         for travel in (8, 16):

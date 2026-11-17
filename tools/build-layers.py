@@ -71,6 +71,8 @@ CHEEK_PULL = Path(__file__).resolve().parent / "head" / "cheeks.py"
 _cheek_pull = None
 HEM_BAND = Path(__file__).resolve().parent / "cloth" / "hem.py"
 _hem_band = None
+BEHIND = Path(__file__).resolve().parent / "cloth" / "behind.py"
+_behind = None
 _head_layers = None
 _head_plate = None
 _iris_layers = None
@@ -90,6 +92,22 @@ def hem_band():
             sys.dont_write_bytecode = previous
         _hem_band = module
     return _hem_band
+
+
+def behind_fill():
+    """tools/cloth/behind.py, loaded from this folder without writing bytecode (only accessories cut by an outline need it)."""
+    global _behind
+    if _behind is None:
+        spec = importlib.util.spec_from_file_location("mesh_avatar_behind", BEHIND)
+        module = importlib.util.module_from_spec(spec)
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        _behind = module
+    return _behind
 
 
 def iris_layers():
@@ -263,24 +281,19 @@ def behind_front(rgba, region, band, fill, front):
     return out
 
 
-def fill_behind(rgba, base, area):
-    """The base behind accessories cut by an outline (a handbag hanging over a skirt): a smooth fill of the colours of
-    the opaque pixels round them (the background's colour is not used), opaque where the alpha inpainted from round them
-    is at least half - the figure goes on behind there - and transparent where they hung over the background. The small
-    tassels cut by colour keep the fade above."""
+def fill_behind(rgba, base, area, garment=None):
+    """The base behind accessories cut by an outline (a handbag hanging over a skirt): the garment goes on behind them
+    with its own texture - its print, folds and seams copied from round it (tools/cloth/behind.py) - as far as the
+    figure's outline, interpolated across them, reaches, with a smooth edge there; beyond it, where they hung over the
+    background, transparent. `garment` (bool): the garments traced round them, where the texture comes from (else every
+    opaque pixel round them). The small tassels cut by colour keep the fade above."""
     inside = area > 0
-    ys, xs = np.nonzero(inside)
-    h, w = inside.shape
-    pad = max(64, int(max(ys.max() - ys.min(), xs.max() - xs.min())))
-    y0, y1, x0, x1 = max(0, ys.min() - pad), min(h, ys.max() + pad + 1), max(0, xs.min() - pad), min(w, xs.max() + pad + 1)
-    window = (slice(y0, y1), slice(x0, x1))
-    known = (rgba[window][..., 3] > 128) & ~inside[window]
-    rgb = smooth_fill(rgba[window][..., :3], known)
-    alpha = cv2.inpaint(np.ascontiguousarray(rgba[..., 3]), area, 9, cv2.INPAINT_TELEA)
+    source = (rgba[..., 3] == 255) & ~inside
+    if garment is not None and (garment & source).sum() >= inside.sum():
+        source &= garment
+    filled = behind_fill().fill(rgba, inside, source)
     out = base.copy()
-    out[window][..., :3][inside[window]] = rgb[inside[window]]
-    # a soft edge against the background has background behind it (drawn over a fill, it would not be the drawing)
-    out[..., 3][inside] = np.where((alpha[inside] >= 128) & (rgba[..., 3][inside] == 255), 255, 0).astype(np.uint8)
+    out[inside] = filled[inside]
     return out
 
 
@@ -944,6 +957,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         options += b"cheek-pull:" + CHEEK_PULL.read_bytes()
     if rig.get("limbs"):  # only rigs with limbs depend on the limb cutter
         options += b"limbs:" + LIMB_LAYERS.read_bytes()
+    if any(accessory.get("outline") is not None for accessory in rig.get("accessories", [])):
+        options += b"behind:" + BEHIND.read_bytes()  # what lies behind an accessory cut by an outline
     if any(eye.get("iris") is not None for eye in rig["eyes"]):  # only eyes with an iris depend on the iris cutter
         options += b"iris:" + IRIS_LAYERS.read_bytes()
     build_id = hashlib.sha256(
@@ -1074,7 +1089,16 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
             (accessory_bg > 0) & (outlined == 0), (base[..., 3] * fade).astype(np.uint8), base[..., 3]
         )
         if np.any(outlined):
-            base = fill_behind(rgba, base, outlined)
+            # the texture behind them comes from the garments traced round them, never a hand or another accessory
+            near = cv2.dilate(outlined, np.ones((21, 21), np.uint8)) > 0
+            garment = None
+            for cloth in rig.get("cloth", []):
+                shape = polygon_mask((h, w), cloth["outline"]) > 0
+                if (shape & near).any():
+                    garment = shape if garment is None else garment | shape
+            if garment is not None:
+                garment &= (remove | accessory_bg) == 0
+            base = fill_behind(rgba, base, outlined, garment)
     images["base"] = base
     images["hairmask"] = hair_mask(rgba, rig, external_hair)
     if rig.get("cloth"):
