@@ -816,5 +816,161 @@ class IrisLayersTest(unittest.TestCase):
             self.assertEqual((self.project / "built/layers.json").read_bytes(), before)
 
 
+class HemBandTest(unittest.TestCase):
+    """--cloth-under hem: the base keeps the garment, except a band along its free edges (tools/cloth/hem.py)."""
+
+    SIZE = (200, 300)
+    TORSO = (236, 200, 180, 255)
+    SKIRT = (120, 150, 210, 255)
+    LINE = (30, 30, 60, 255)
+    LEG = (230, 180, 160, 255)
+    WAIST, HEM = 110, 220
+    LEGS = ((70, 92), (108, 130))  # x ranges; the legs run from under the skirt down to the bottom
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.project = Path(self.temporary.name)
+        w, h = self.SIZE
+        image = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((60, 20, 140, self.WAIST + 4), fill=self.TORSO)  # head and torso
+        for x0, x1 in self.LEGS:
+            draw.rectangle((x0, 180, x1, h - 1), fill=self.LEG)
+        # the skirt, wider at the hem, with a 3 px line around it
+        self.skirt = [(58, self.WAIST), (142, self.WAIST), (166, self.HEM), (34, self.HEM)]
+        draw.polygon(self.skirt, fill=self.LINE)
+        inner = [(61, self.WAIST + 1), (139, self.WAIST + 1), (162, self.HEM - 3), (38, self.HEM - 3)]
+        draw.polygon(inner, fill=self.SKIRT)
+        image.save(self.project / "source.png")
+        self.source = np.array(image)
+        rig = json.loads((ROOT / "samples/miko-qipao/rig.json").read_text())
+        for key in ("hand", "buns", "accessories", "strands"):
+            rig.pop(key, None)
+        rig["image"] = {"width": w, "height": h}
+        rig["eyes"] = []
+        for left in (72, 112):
+            rig["eyes"].append({"opening": [[left, 50], [left + 14, 50], [left + 14, 56], [left, 56]],
+                                "roi": [[left - 4, 44], [left + 18, 44], [left + 18, 60], [left - 4, 60]]})
+        # the bound outline sits inside the drawn edge (as the pipeline traces it, away from the soft edge)
+        self.outline = [[64, self.WAIST + 3], [136, self.WAIST + 3], [158, self.HEM - 5], [42, self.HEM - 5]]
+        rig["cloth"] = [{"name": "skirt", "outline": self.outline, "waist": [[64, self.WAIST + 3], [136, self.WAIST + 3]],
+                         "hem": [[42, self.HEM - 5], [100, self.HEM - 5], [158, self.HEM - 5]], "max": 12}]
+        self.rig = rig
+        legs = Image.new("L", (w, h), 0)
+        for x0, x1 in self.LEGS:
+            ImageDraw.Draw(legs).rectangle((x0, 180, x1, h - 1), fill=255)
+        legs.save(self.project / "legs.png")
+
+    def build(self, *options, travel=None):
+        rig = copy.deepcopy(self.rig)
+        if travel is not None:
+            rig["cloth"][0]["max"] = travel
+        (self.project / "rig.draft.json").write_text(json.dumps(rig))
+        return subprocess.run([sys.executable, str(SCRIPT), str(self.project), "--rig", "rig.draft.json", *options],
+                              capture_output=True, text=True, check=False)
+
+    def meta(self):
+        return json.loads((self.project / "built/layers.json").read_text())
+
+    def image(self, name):
+        with Image.open(self.project / f"built/{name}.png") as picture:
+            return np.array(picture.convert("RGBA"))
+
+    def layer(self, name):
+        w, h = self.SIZE
+        x, y, lw, lh = self.meta()["layers"][name]
+        full = np.zeros((h, w, 4), np.uint8)
+        full[y : y + lh, x : x + lw] = self.image(name)
+        return full
+
+    @staticmethod
+    def over(below, above):
+        a = above[..., 3:4].astype(np.float32) / 255
+        b = below[..., 3:4].astype(np.float32) / 255
+        rgb = above[..., :3] * a + below[..., :3] * b * (1 - a)
+        alpha = a + b * (1 - a)
+        return np.concatenate([rgb / np.maximum(alpha, 1e-6), alpha * 255], -1)
+
+    def test_the_band_follows_the_travel_and_the_picture_stays_the_same_at_rest(self):
+        result = self.build("--cloth-under", "hem", "--hem-legs", str(self.project / "legs.png"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        meta = self.meta()
+        report = meta["clothUnder"]["garments"]["skirt"]
+        self.assertEqual(meta["clothUnder"]["mode"], "hem")
+        self.assertEqual(report["band"], 1.25 * 12 + 3)
+        base, bare, garment = self.image("base"), self.image("base_cloth"), self.layer("cloth_skirt")
+        # at rest the garment layer over the base under it is the picture (below the face, whose eyes the base fills)
+        rest = self.over(bare.astype(np.float32), garment.astype(np.float32))
+        seen = lambda im: im[..., :3] * (im[..., 3:4] / 255)
+        error = np.abs(seen(rest) - seen(self.source.astype(np.float32))).max(-1)
+        self.assertLessEqual(float(error[self.WAIST - 10 :].max()), 1.0)
+        # the band: where base_cloth no longer holds the garment
+        changed = np.abs(bare.astype(int) - base.astype(int)).max(-1) > 0
+        ys, xs = np.nonzero(changed)
+        self.assertGreater(len(ys), 200)
+        self.assertGreater(ys.min(), self.WAIST + 3)  # never at or above the waist line
+        # it narrows towards the waist: a quarter of the way down it is at most a quarter of the depth at the hem
+        quarter = int(self.WAIST + 3 + 0.25 * (self.HEM - self.WAIST))
+        row = np.nonzero(changed[quarter])[0]
+        self.assertTrue(len(row) <= 2 * (0.25 * report["band"] + 10 + 2))
+        # at the sides it is transparent; under the hem it continues the legs, shaded, and is transparent between them
+        side = changed.copy()
+        side[:, 50:150] = False
+        self.assertGreater(int(side.sum()), 50)
+        self.assertTrue((bare[..., 3][side] == 0).all())
+        y = self.HEM - 8
+        for x0, x1 in self.LEGS:
+            centre = (x0 + x1) // 2
+            self.assertTrue(changed[y, centre])
+            self.assertEqual(int(bare[y, centre, 3]), 255)
+            ratio = bare[y, centre, :3].astype(float) / np.array(self.LEG[:3])
+            self.assertTrue((ratio > 0.6).all() and (ratio <= 1.01).all(), ratio)
+        self.assertTrue(changed[y, 100])
+        self.assertEqual(int(bare[y, 100, 3]), 0)
+        # the garment's drawn edge goes with the garment layer where the band is, not above it
+        y = self.HEM - 30
+        edge = int(np.nonzero(self.source[y, :, 3] > 0)[0].min())  # the drawn line on the skirt's left side
+        self.assertEqual(self.source[y, edge].tolist(), list(self.LINE))
+        self.assertEqual(int(garment[y, edge, 3]), 255)
+        self.assertEqual(int(bare[y, edge, 3]), 0)
+        self.assertEqual(int(garment[self.WAIST + 1, 100, 3]), 0)
+        self.assertEqual(bare[self.WAIST + 1, 100].tolist(), base[self.WAIST + 1, 100].tolist())
+
+    def test_without_legs_the_band_is_transparent_and_it_is_as_deep_as_the_travel_allows(self):
+        counts = {}
+        for travel in (8, 16):
+            result = self.build("--cloth-under", "hem", travel=travel)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            base, bare = self.image("base"), self.image("base_cloth")
+            changed = np.abs(bare.astype(int) - base.astype(int)).max(-1) > 0
+            self.assertTrue((bare[..., 3][changed] == 0).all())
+            self.assertEqual(self.meta()["clothUnder"]["garments"]["skirt"]["legs"], 0)
+            # how deep it reaches at the hem, in the middle of the skirt
+            column = np.nonzero(changed[:, 100])[0]
+            counts[travel] = int(column.max() - column.min() + 1)
+            self.assertLessEqual(counts[travel], 1.25 * travel + 3 + 10 + 1)
+        self.assertGreater(counts[16], counts[8] + 5)
+
+    def test_hem_never_reads_the_under_drawing_and_needs_its_own_option_for_legs(self):
+        (self.project / "source_under.png").write_bytes(b"not a picture")
+        keep = self.build("--cloth-under", "keep")
+        self.assertEqual(keep.returncode, 0, keep.stderr)
+        kept = self.meta()["build"]
+        self.assertNotIn("clothUnder", self.meta())
+        self.assertEqual(self.image("base_cloth").tolist(), self.image("base").tolist())
+        hem = self.build("--cloth-under", "hem")
+        self.assertEqual(hem.returncode, 0, hem.stderr)
+        self.assertNotEqual(self.meta()["build"], kept)
+        wrong = self.build("--hem-legs", str(self.project / "legs.png"))
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertIn("--hem-legs goes with --cloth-under hem", wrong.stderr)
+        small = self.project / "small.png"
+        Image.new("L", (10, 10), 255).save(small)
+        bad = self.build("--cloth-under", "hem", "--hem-legs", str(small))
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("--hem-legs small.png is 10 x 10", bad.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -48,7 +48,12 @@ explain coordinates and placement.
    `built/base.png`, `built/hairmask.png`, the four `eye{i}_ball/lash/low/crease.png` layers per
    eye, and `built/layers.json`. Hand and accessory layers are generated only when present
    in the rig. With `--open-eyes` it also writes `eye{i}_open.png`, the original pixels around
-   each eye that the runtime shows while the eye is fully open. For an eye with `iris` in the rig it
+   each eye that the runtime shows while the eye is fully open. `--cloth-under keep` keeps the garments in
+   `base_cloth.png` (nothing is redrawn under them); `--cloth-under hem` keeps them except a band along
+   each garment's hem, which the garment uncovers when it swings: there the base is transparent, or with
+   `--hem-legs legs.png` (white = legs, source size) it carries the legs that come out under the hem up into
+   the band, shaded. The band is as deep as the garment's `max` allows and narrows to nothing at its waist;
+   nothing in it is generated (see `tools/cloth/hem.py`). For an eye with `iris` in the rig it
    also writes `eye{i}_white.png` and `eye{i}_iris.png`: the eye white with the iris painted out and
    the iris as a sprite, which the runtime moves with the gaze instead of warping the eye ball (the
    reason is printed, and the eye is cut as before, when the picture has no eye white beside the iris
