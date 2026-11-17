@@ -82,9 +82,11 @@ export interface MeshAvatar {
    * input is not finite). A new grab of the same part replaces the old one, whose handle then goes stale.
    * - `cheek`: the cheek layers of that side (left/right in the image; see `cheekPull`). A pull moves the face's outer
    *   contour outwards in an arc while the eyes, nose, chin and the other side stay; depth swells and lights the skin.
-   * - `strand`: the hair strand of that name nearest the press, its node nearest the press held at the pointer.
+   * - `strand`: the hair strand of that name nearest the press, its node nearest the press held at the pointer, its tip
+   *   at most `strands[].reach` from where it hangs. Strands without a reach are not held (null).
    * - `cloth`: the garment's hem at `at` (0–1 along it; nearest the press when omitted) held towards the pointer, never
-   *   beyond the garment's own hem travel (`cloth[].max`) and never lifted.
+   *   beyond `cloth[].reach` and the garment's own hem travel (`cloth[].max`) and never lifted. Garments without a
+   *   reach are not held (null).
    * - `limb`: the limb chain swings (and bends, held below its middle joint) towards the pointer, within its limits.
    * - `accessory`: a hanging tassel (`rig.accessories`) points from its knot towards the pointer.
    * WebGL runtime only.

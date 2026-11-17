@@ -17,6 +17,12 @@ export interface Strand {
   sigma: number;
   k: number;
   max: number;
+  /**
+   * Optional (M11): how far a held strand's tip may be pulled from where it hangs, px. With it the strand can be held
+   * (canGrab / grab, WebGL runtime only); without it a drag flicks the strand as before. Builds write it only when
+   * the picture keeps a pull that far clean.
+   */
+  reach?: number;
 }
 export interface Accessory {
   name: string;
@@ -56,6 +62,12 @@ export interface Cloth extends Partial<ClothTuning> {
   rows?: number;
   behind?: boolean;
   parent?: string;
+  /**
+   * Optional (M11): how far a held hem may be pulled from where it hangs, px; the hem never goes beyond the garment's
+   * own travel (`max`). With it the garment can be held (canGrab / grab, WebGL runtime only); without it a drag swings
+   * the hem as before.
+   */
+  reach?: number;
 }
 export interface Hand {
   outline: Point[];

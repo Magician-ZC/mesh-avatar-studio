@@ -148,13 +148,15 @@ test('an impulse sways a hair strand, which comes back to the undisturbed frame'
   expect(result.settled).toBe(0);
 });
 
-test('a held strand stays at the pointer while held and comes back after the release; no cheek layers, no cheek pull', async ({ page }) => {
+test('a held strand stays at the pointer while held and comes back after the release; without a reach it is not held; no cheek layers, no cheek pull', async ({ page }) => {
   test.skip(!samplePresent, sampleSkipReason);
   test.setTimeout(90_000);
   await blankPage(page);
   const result = await page.evaluate(async () => {
     const { createMeshAvatar } = await import('/packages/runtime/src/index.ts' as string) as typeof import('mesh-avatar');
     const rig = await (await fetch('/miko-qipao/rig.json')).json();
+    // the sample predates M11: its strands have no reach and are not held; an M11 build gives them one
+    const reached = { ...rig, strands: rig.strands.map((s: object) => ({ ...s, reach: 30 })) };
     const seeded = (seed: number) => () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
     const random = Math.random;
     const frames = async (hold: boolean) => {
@@ -162,7 +164,7 @@ test('a held strand stays at the pointer while held and comes back after the rel
       const canvas = document.createElement('canvas');
       canvas.style.cssText = 'width: 600px; height: 600px;';
       document.body.replaceChildren(canvas);
-      const avatar = await createMeshAvatar(canvas, { rig, assetsBase: '/miko-qipao/built', manual: true, padTop: 0, padSide: 0 });
+      const avatar = await createMeshAvatar(canvas, { rig: hold ? reached : rig, assetsBase: '/miko-qipao/built', manual: true, padTop: 0, padSide: 0 });
       avatar.setAutoIdle(false); avatar.setAutoMotion(false);
       const read = () => {
         const copy = document.createElement('canvas');
@@ -172,6 +174,7 @@ test('a held strand stays at the pointer while held and comes back after the rel
         return context.getImageData(0, 0, copy.width, copy.height).data;
       };
       const cheek = { pull: avatar.cheekPull, grab: avatar.grab({ kind: 'cheek', side: 'left' }, 500, 500), can: avatar.canGrab({ kind: 'cheek', side: 'right' }) };
+      const refused = hold ? null : { can: avatar.canGrab({ kind: 'strand', name: 'sideL' }), grab: avatar.grab({ kind: 'strand', name: 'sideL' }, 0, 0) };
       avatar.advance(0.5);
       const tip = rig.strands.find((s: { name: string }) => s.name === 'sideL').nodes.at(-1);
       const handle = hold ? avatar.grab({ kind: 'strand', name: 'sideL' }, tip[0], tip[1]) : null;
@@ -184,7 +187,7 @@ test('a held strand stays at the pointer while held and comes back after the rel
       avatar.advance(2.5);
       const settled = read();
       avatar.destroy();
-      return { held, stillHeld, settled, handle, cheek };
+      return { held, stillHeld, settled, handle, cheek, refused };
     };
     try {
       const still = await frames(false), held = await frames(true);
@@ -194,12 +197,13 @@ test('a held strand stays at the pointer while held and comes back after the rel
         return count;
       };
       return {
-        handle: held.handle, cheek: held.cheek, moved: differing(still.held, held.held, 8),
+        handle: held.handle, cheek: held.cheek, refused: still.refused, moved: differing(still.held, held.held, 8),
         kept: differing(still.stillHeld, held.stillHeld, 8), settled: differing(still.settled, held.settled, 2),
       };
     } finally { Math.random = random; }
   });
   expect(result.cheek).toEqual({ pull: false, grab: null, can: false });
+  expect(result.refused).toEqual({ can: false, grab: null });
   expect(Number.isInteger(result.handle) && result.handle! > 0).toBe(true);
   expect(result.moved).toBeGreaterThan(300);
   expect(result.kept).toBeGreaterThan(0.5 * result.moved); // still held a moment later

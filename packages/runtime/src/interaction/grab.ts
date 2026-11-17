@@ -4,9 +4,14 @@
 //
 //   cheek      the cheek layers (./cheek.ts): the contour is pulled outwards, the skin inside follows; depth swells it
 //   strand     the hair strand nearest the press: the chain from its root to the held node is placed at the pointer
-//              (a position constraint before each physics step); the rest of the strand follows by its own springs
+//              (a position constraint before each physics step), its tip at most the strand's `reach` from where it
+//              hangs; the rest of the strand follows by its own springs
 //   cloth      the garment columns at `at` (or nearest the press) turn so their hem points at the pointer, within the
-//              garment's own hem travel (`max`); the hem is never lifted beyond the turn it already makes when it swings
+//              garment's `reach` and its own hem travel (`max`); the hem is never lifted beyond the turn it already makes
+//              when it swings
+//
+// Strands and garments are held only when the rig gives them a `reach` (M11 builds); without it they are refused, and
+// a drag flicks them as before (impulse).
 //   limb       the limb chain swings (and bends, when held below its middle joint) towards the pointer, within its limits
 //   accessory  a hanging tassel (rig.accessories) points from its knot towards the pointer, within its swing limit
 //
@@ -35,7 +40,11 @@ interface LimbChainLike { name: string; root: Point; middle: Point; end: Point; 
 
 export interface GrabParts {
   rig: Rig;
-  physics: { strands: StrandState[]; chains: TasselState[]; hairAnchor(at: Point, P: Record<string, number>): number[] };
+  physics: {
+    strands: StrandState[]; chains: TasselState[]; hairAnchor(at: Point, P: Record<string, number>): number[];
+    /** Per strand, the tip offset (px) a grab lets it show (physics.js): set while held, it fades after the release. */
+    held?: number[];
+  };
   /** The garment of that name (cloth.js), or null. */
   garment(name: string): HeldGarment | null;
   limbs: { chains: LimbChainLike[]; values(name: string, P: Record<string, number>): { swing: number; bend: number } | null } | null;
@@ -89,7 +98,7 @@ interface Held {
   depth: number;
   strand?: { index: number; node: number; grip: Point };
   tassel?: { index: number; length: number };
-  cloth?: { garment: HeldGarment; at: number };
+  cloth?: { garment: HeldGarment; at: number; name: string };
   /** `left`: how far the held swing and bend are from where the limb goes without the grab (for a smooth release). */
   limb?: { chain: LimbChainLike; from: Point; swing: number; bend: number; second: boolean; left: { swing: number; bend: number } };
 }
@@ -103,7 +112,13 @@ export function createGrabs(parts: GrabParts) {
   let next = 1;
 
   const keyOf = (t: GrabTarget) => t.kind === 'cheek' ? `cheek:${t.side}` : `${t.kind}:${t.name}`;
-  const strandIndices = (name: string) => (rig.strands ?? []).flatMap((s, i) => s.name === name ? [i] : []);
+  // the strands of that name a grab can hold: those with a reach
+  const strandIndices = (name: string) => (rig.strands ?? []).flatMap((s, i) => s.name === name && s.reach! > 0 ? [i] : []);
+  /** How far the named garment's hem may be held from where it hangs (its reach within its travel), or 0. */
+  const hemReach = (name: string, g: HeldGarment) => {
+    const reach = (rig.cloth ?? []).find(c => c.name === name)?.reach;
+    return reach! > 0 ? Math.min(reach!, g.tuning.max) : 0;
+  };
 
   function valid(target: unknown): target is GrabTarget {
     if (!target || typeof target !== 'object') return false;
@@ -119,7 +134,7 @@ export function createGrabs(parts: GrabParts) {
     switch (target.kind) {
       case 'cheek': return !!parts.cheeks?.has(target.side);
       case 'strand': return strandIndices(target.name).some(i => physics.strands[i]);
-      case 'cloth': return !!parts.garment(target.name);
+      case 'cloth': { const g = parts.garment(target.name); return !!g && hemReach(target.name, g) > 0; }
       case 'limb': return !!parts.limbs?.chains.some(c => c.name === target.name);
       case 'accessory': return physics.chains.some(c => c.t.name === target.name);
     }
@@ -147,7 +162,7 @@ export function createGrabs(parts: GrabParts) {
       entry.strand = { index: best.index, node: best.node, grip: [best.at[0] - x, best.at[1] - y] };
     } else if (target.kind === 'cloth') {
       const garment = parts.garment(target.name)!;
-      entry.cloth = { garment, at: target.at === undefined ? hemAt(garment, x, y) : clamp(target.at, 0, 1) };
+      entry.cloth = { garment, name: target.name, at: target.at === undefined ? hemAt(garment, x, y) : clamp(target.at, 0, 1) };
     } else if (target.kind === 'limb') {
       const chain = parts.limbs!.chains.find(c => c.name === target.name)!;
       const P = parts.parameters(), now = parts.limbs!.values(chain.name, P) ?? { swing: 0, bend: 0 };
@@ -274,9 +289,10 @@ export function createGrabs(parts: GrabParts) {
         if (!state?.p) continue;
         const strand = rig.strands![index], nodes = strandNodes(strand.nodes);
         const anchor = physics.hairAnchor(nodes[node], P);
-        // the held node at the pointer, no further from where it hangs than the strand can show
+        // the held node at the pointer, no further from where it hangs than the strand's reach lets it
         let dx = goal[0] + grip[0] - anchor[0], dy = goal[1] + grip[1] - anchor[1];
-        const limit = Math.max(2, strand.max * node / 3), length = Math.hypot(dx, dy);
+        const limit = Math.max(2, strand.reach! * node / 3), length = Math.hypot(dx, dy);
+        if (physics.held) physics.held[index] = strand.reach!;
         if (length > limit) { dx *= limit / length; dy *= limit / length; }
         for (let j = 1; j <= node; j++) {
           const a = j === node ? anchor : physics.hairAnchor(nodes[j], P), share = j / node;
@@ -299,7 +315,7 @@ export function createGrabs(parts: GrabParts) {
   function beforeCloth(): void {
     for (const entry of held.values()) {
       if (!entry.cloth) continue;
-      const { garment: g, at } = entry.cloth;
+      const { garment: g, at, name } = entry.cloth, reach = hemReach(name, g);
       const positions = hemPositions(g), spacing = g.cols > 1 ? 1 / (g.cols - 1) : 1;
       const [dx, dy] = entry.offset;
       for (let k = 0; k < g.cols; k++) {
@@ -312,8 +328,8 @@ export function createGrabs(parts: GrabParts) {
         const length = g.grid.custom ? g.grid.lengths?.[k] ?? Math.sqrt(chord) : Math.sqrt(chord);
         if (!(chord > 1) || !(length > 1)) continue;
         // the turn that moves the hem by the pointer's part across the column (cloth.js: dθ moves it by dθ · (ry, −rx)),
-        // within the angle at which the hem reaches the garment's travel
-        const limit = 0.95 * 2 * Math.asin(Math.min(0.95, g.tuning.max / (2 * length)));
+        // within the angle at which the hem reaches the garment's reach (at most its travel)
+        const limit = 0.95 * 2 * Math.asin(Math.min(0.95, reach / (2 * length)));
         const theta = clamp((dx * ry - dy * rx) / chord, -limit, limit);
         if (g.grid.custom) {
           const pendulum = g.pendulums[k];

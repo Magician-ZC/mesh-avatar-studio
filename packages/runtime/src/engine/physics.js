@@ -42,6 +42,11 @@ export function createPhysics(engine, rig) {
 
   const HAIR = Object.fromEntries(Object.entries(rig.buns ?? {}).map(([key, area]) => [key, { at: [area.cx, area.cy], k: 260, c: 11, hang: 3, max: 4 }]));
 
+  // A held strand (../interaction/grab.ts) shows its pull: while held its offset is limited by its reach instead of
+  // its sway limit (HELD_SOFT times it, so the soft limit hardly bends the pull), and after the release that allowance
+  // fades with HELD_FADE (s) while the strand springs back, so nothing jumps. Strands never held keep the sway limit.
+  const HELD_SOFT = 3, HELD_FADE = 0.25;
+
   const clampLen = (v, m) => { const l = Math.hypot(v[0], v[1]); if (l > m) { v[0] *= m / l; v[1] *= m / l; } };
 
   class Physics {
@@ -55,6 +60,7 @@ export function createPhysics(engine, rig) {
       }
       this.strands = STRANDS.map(() => ({ p: null, v: [[0, 0], [0, 0], [0, 0], [0, 0]] }));
       this.out.strands = STRANDS.map(() => [[0, 0], [0, 0], [0, 0], [0, 0]]);
+      this.held = STRANDS.map(() => 0);   // per strand, the tip offset a grab lets it show (set by the grab each frame)
       this.fringe = FRINGE;   // the first strands, bound into one sheet below (read by interaction impulses)
       this.chains = TASSELS.map(t => {
         const dx = t.tip[0] - t.pivot[0], dy = t.tip[1] - t.pivot[1], L = Math.hypot(dx, dy);
@@ -108,9 +114,16 @@ export function createPhysics(engine, rig) {
           }
           st.p[0] = [...target[0]];
         }
+        const held = this.held[si];
         for (let j = 0; j < 4; j++) {
           const o = [st.p[j][0] - target[j][0], st.p[j][1] - target[j][1]];
-          out[j] = softLimit(o, Math.max(0.5, cfg.max * HAIR_TUNE.reach * Math.max(1, g) * j / 3));
+          const limit = Math.max(0.5, cfg.max * HAIR_TUNE.reach * Math.max(1, g) * j / 3);
+          out[j] = softLimit(o, held > 0 ? Math.max(limit, HELD_SOFT * held * j / 3) : limit);
+        }
+        if (held > 0) {
+          // faded to where the sway limit is the larger one anyway: back to the sway limit
+          const next = held * Math.exp(-dt / HELD_FADE);
+          this.held[si] = HELD_SOFT * next > cfg.max * HAIR_TUNE.reach ? next : 0;
         }
       });
 

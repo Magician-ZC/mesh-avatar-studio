@@ -9,7 +9,10 @@ import { createGrabs, type HeldGarment } from '../src/interaction/grab.ts';
 import type { ImpulseTarget } from '../src/interaction/impulse.ts';
 import type { Point } from '../src/rig/types';
 
-const rig = parseRig(fixture);
+const old = parseRig(fixture);
+// an M11 build: every strand may be pulled 40 px at its tip, the skirt's hem 10 px (its travel is 12)
+const REACH = 40;
+const rig = { ...old, strands: old.strands!.map(s => ({ ...s, reach: REACH })), cloth: [{ name: 'skirt', reach: 10 }] } as typeof old;
 const P: Record<string, number> = Object.fromEntries(PARAMS.map(p => [p.id, p.def]));
 
 // a garment of 5 straight columns, 100 px long, hems at y = 300, its travel 12 px
@@ -23,9 +26,9 @@ function garment(): HeldGarment {
   };
 }
 
-function setup() {
-  const engine = createRig(rig);
-  const { Physics } = createPhysics(engine, rig);
+function setup(avatar = rig) {
+  const engine = createRig(old);
+  const { Physics } = createPhysics(engine, avatar);
   const physics = new Physics();
   for (let i = 0; i < 30; i++) physics.step(P, 1 / 60);
   const impulses: [ImpulseTarget, number, number][] = [];
@@ -37,7 +40,7 @@ function setup() {
       ? { swing: Math.max(-1, Math.min(1, values['limb:arm:swing'] ?? 0)), bend: Math.max(-1, Math.min(1, values['limb:arm:bend'] ?? 0)) } : null,
   };
   const grabs = createGrabs({
-    rig, physics, limbs, cheeks: null, cheekFrame: () => null, place: p => [p[0], p[1]],
+    rig: avatar, physics, limbs, cheeks: null, cheekFrame: () => null, place: p => [p[0], p[1]],
     garment: name => name === 'skirt' ? skirt : null, parameters: () => parameters,
     impulse: (target, vx, vy) => { impulses.push([target, vx, vy]); },
   });
@@ -61,6 +64,16 @@ describe('grab', () => {
     expect(grabs.active).toBe(false);
   });
 
+  test('strands and garments without a reach are not held: a drag flicks them as before', () => {
+    const { grabs } = setup(old);
+    for (const target of [{ kind: 'strand', name: 'sideR' }, { kind: 'cloth', name: 'skirt' }, { kind: 'cloth', name: 'skirt', at: 0.5 }]) {
+      expect(grabs.can(target)).toBe(false);
+      expect(grabs.grab(target, 140, 300)).toBeNull();
+    }
+    expect(grabs.can({ kind: 'limb', name: 'arm' })).toBe(true); // other parts as before
+    expect(grabs.active).toBe(false);
+  });
+
   test('a strand is held at the pointer, keeps still while held and springs back when let go', () => {
     const { physics, grabs, impulses, run } = setup();
     const nodes = rig.strands![strandIndex].nodes, end = nodes[nodes.length - 1];
@@ -70,13 +83,25 @@ describe('grab', () => {
     grabs.move(handle, 30, 0);
     run(60);
     const held = tip(physics)[0];
-    expect(held).toBeGreaterThan(0.5 * rig.strands![strandIndex].max);
-    expect(held).toBeLessThanOrEqual(rig.strands![strandIndex].max + 1e-9);
+    // the strand's reach, not its sway limit, bounds the pull: 30 px shows (the soft limit takes off a few per cent)
+    expect(held).toBeGreaterThan(0.9 * 30);
+    expect(held).toBeLessThanOrEqual(30 + 1); // and the breeze of one step
+    grabs.move(handle, 300, 0);
+    run(30);
+    expect(tip(physics)[0]).toBeGreaterThan(0.9 * REACH);
+    expect(tip(physics)[0]).toBeLessThanOrEqual(REACH + 1);
+    grabs.move(handle, 30, 0);
+    run(30);
     run(30);
     expect(tip(physics)[0]).toBeCloseTo(held, 0);
     grabs.release(handle, 200, 0);
     expect(impulses).toEqual([[{ kind: 'strand', name: 'sideR' }, 200, 0]]);
-    run(240);
+    // after the release the allowance fades while the strand springs back: no frame jumps
+    let last = tip(physics)[0], jump = 0;
+    for (let i = 0; i < 120; i++) { run(1); jump = Math.max(jump, Math.abs(tip(physics)[0] - last)); last = tip(physics)[0]; }
+    expect(jump).toBeLessThan(8);
+    expect((physics as unknown as { held: number[] }).held[strandIndex]).toBe(0);
+    run(120);
     expect(Math.abs(tip(physics)[0])).toBeLessThan(2);
     // stale and unknown handles are ignored
     grabs.release(handle, 1, 1); grabs.move(handle, 50, 0); grabs.release(999, 1, 1);
@@ -105,12 +130,12 @@ describe('grab', () => {
     expect(Math.abs(chain.st.w[0])).toBeLessThanOrEqual(6);
   });
 
-  test('a hem follows the pointer sideways, never beyond its travel and never up', () => {
+  test('a hem follows the pointer sideways, never beyond its reach and travel and never up', () => {
     const { grabs, skirt, impulses } = setup();
     const handle = grabs.grab({ kind: 'cloth', name: 'skirt' }, 140, 300)!; // the middle column's hem
     grabs.move(handle, 100, 0);
     grabs.beforeCloth();
-    const limit = 0.95 * 2 * Math.asin(12 / 200);
+    const limit = 0.95 * 2 * Math.asin(10 / 200); // its reach (10) within its travel (12)
     expect(skirt.angle[2]).toBeCloseTo(limit, 9);
     expect(skirt.angularVelocity[2]).toBe(0);
     expect(skirt.angle[0]).toBe(0); // two columns away: untouched

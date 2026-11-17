@@ -111,6 +111,7 @@ the engine mapping. Do not copy the example illustration's coordinates into a ne
 | `strands[*].sigma` | Width of strand influence, px; around half the visible lock width. |
 | `strands[*].k` | Positive spring response multiplier, unitless; start near `1`. |
 | `strands[*].max` | Maximum hair displacement, px; start around 7–12. |
+| `strands[*].reach` | Optional positive distance, px: how far a held strand's tip may be pulled from where it hangs (`grab({ kind: 'strand' })`, WebGL runtime only). Without it the strand is not held and a drag flicks it as before; while held, `max` no longer bounds the strand, and after the release the strand springs back. Set it only as far as the drawing stays clean when the lock moves that far. |
 | `accessories[*].name` | Unique safe layer filename stem (letters/digits/underscore/hyphen), not a reserved layer name. |
 | `accessories[*].pivot` | Hanging accessory root `[x,y]`, px; fixed attachment point. |
 | `accessories[*].tip` | Hanging accessory endpoint `[x,y]`, px; bottom of pendant/tassel. |
@@ -183,6 +184,7 @@ Coordinates are source-image pixels, with x increasing right and y increasing do
 | `cloth[*].cohesion` | Integer smoothing passes over column angles and angular velocities, `0..8`; default `3`. |
 | `cloth[*].wind` | Nonnegative coherent breeze strength as a fraction of `max`; default `0.05`, `0` disables wind. All columns receive the same phase. |
 | `cloth[*].max` | Positive soft limit on grid displacement from the body-carried shape, px; default `20`. Limits rotation at the hem and reserves up to 10% for weak vertical bounce. Extrapolated mesh points outside the grid can move farther. |
+| `cloth[*].reach` | Optional positive distance, px: how far a held hem may be pulled from where it hangs (`grab({ kind: 'cloth' })`, WebGL runtime only), never beyond `max`. Without it the garment is not held and a drag swings its hem as before. |
 | `cloth[*].behind` | Optional boolean, default `false`; draw before the bare base when true. Changing depth requires rebuilding overlapping cutouts. |
 | `cloth[*].parent` | Optional name of an **earlier** cloth entry. Its displaced grid drives this garment's waist, useful for rear tails attached to a skirt. |
 | `body.hip.shift` | Optional full-body sideways travel at `bodyAngleX=10`, px. Supply with `band` to fade sideways motion toward planted feet. |
