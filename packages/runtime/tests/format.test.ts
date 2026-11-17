@@ -19,6 +19,19 @@ test('cloth folders require both the bare base and the named garment layer', () 
   files['built/layers.json'] = encode({ ...metadata, layers: { ...metadata.layers, cloth_skirt: [0, 0, 100, 100] } });
   expect(validateAvatarFiles(files)).toEqual([]);
 });
+test('cheek data needs a valid contour and the cheek layer of every side it lists', () => {
+  const files = fixture();
+  const left = { edge: [[100, 300], [96, 340], [104, 380]], reach: [40, 50, 40], travel: 20 };
+  files['built/layers.json'] = encode({ ...metadata, cheeks: { left } });
+  expect(validateAvatarFiles(files).join()).toContain('built/layers.json.layers.cheek_left: required for cheeks.left');
+  files['built/layers.json'] = encode({ ...metadata, layers: { ...metadata.layers, cheek_left: [90, 290, 60, 100] }, cheeks: { left } });
+  files['built/cheek_left.png'] = { size: 1 };
+  expect(validateAvatarFiles(files)).toEqual([]);
+  files['built/layers.json'] = encode({ ...metadata, layers: { ...metadata.layers, cheek_left: [90, 290, 60, 100] }, cheeks: { left: { ...left, travel: -1 }, up: left } });
+  const errors = validateAvatarFiles(files).join();
+  expect(errors).toContain('built/layers.json.cheeks.left.travel');
+  expect(errors).toContain('built/layers.json.cheeks.up: unknown side');
+});
 function fixture(): Parameters<typeof validateAvatarFiles>[0] {
   const files: Parameters<typeof validateAvatarFiles>[0] = {
     'avatar.json': encode(manifest), 'rig.json': encode(rig),

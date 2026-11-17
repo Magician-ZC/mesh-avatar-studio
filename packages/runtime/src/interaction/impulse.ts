@@ -127,7 +127,7 @@ const fringeShare = (places: number) => places < FRINGE_FALLOFF ? Math.cos(Math.
 const hemCache = new WeakMap<GarmentState, number[]>();
 
 /** Position of each column's hem point along the hem polyline, by arc length (0 at its first point, 1 at its last). */
-function hemPositions(g: GarmentState): number[] {
+export function hemPositions(g: GarmentState): number[] {
   const cached = hemCache.get(g);
   if (cached) return cached;
   const hem = g.c.hem, lengths = [0];

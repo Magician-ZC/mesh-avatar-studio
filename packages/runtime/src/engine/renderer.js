@@ -8,6 +8,7 @@ import { deviceToSource, placeView, rotateVertexShader, sourceToDevice, viewRota
  * @param {import('../rig/types').Rig} rig */
 export function createRenderer(engine, rig) {
   const { IMG, EYES, MOUTH, CHEEKS } = engine;
+  const NO_PULL = new Float32Array(8);
   // ER6: the whole drawing turns by rig.view.rotation about the image centre; 0 keeps the original shaders and fit
   const ROTATION = viewRotation(rig);
   // WebGL2 renderer: textured grid meshes whose vertices are deformed on the CPU,
@@ -36,6 +37,7 @@ export function createRenderer(engine, rig) {
   uniform vec4 uMouthState;  // open, form, bow, -
   uniform vec4 uCheeks;      // x0, y0, x1, y1
   uniform float uCheek;
+  uniform vec4 uPull[2];     // per cheek layer: swell centre (rest px), radius (px), depth (-1..1, 0 = none)
 
   const int EYE_N = 24;
   float crv(int e, bool top, float u) {
@@ -150,15 +152,27 @@ export function createRenderer(engine, rig) {
     return vec4(mix(base.rgb, col, cov), 1.0);
   }
 
+  // A pulled cheek's swell (interaction/cheek.ts) lit from above: brighter on its upper half, a little shadow below it.
+  vec4 cheekLight(int side, vec2 p, vec4 c) {
+    vec4 s = uPull[side];
+    if (s.w == 0.0 || s.z <= 0.0) return c;
+    vec2 q = (p - s.xy) / s.z;
+    float lift = s.w * exp(-dot(q, q)) * (0.05 - 0.22 * q.y);
+    c.rgb = clamp(c.rgb * (1.0 + lift), 0.0, c.a);
+    return c;
+  }
+
   void main() {
     vec2 p = uRect.xy + vUv * uRect.zw;
     vec2 materialUv = vUv;
     vec4 c;
-    if (uFace == 1) {
+    if (uFace == 1 || uFace >= 10) {
       c = mouth(p, texAt(p));
       float blush = exp(-dot((p - uCheeks.xy) / vec2(48.0, 22.0), (p - uCheeks.xy) / vec2(48.0, 22.0)))
                   + exp(-dot((p - uCheeks.zw) / vec2(40.0, 20.0), (p - uCheeks.zw) / vec2(40.0, 20.0)));
       c.rgb = mix(c.rgb, c.rgb * vec3(1.0, 0.62, 0.64) , clamp(blush * uCheek * 0.55, 0.0, 1.0) * c.a);
+      // cheek layers (uFace 10, 11): drawn like the base, plus the light of their swell
+      if (uFace >= 10) c = cheekLight(uFace - 10, p, c);
     } else if (uFace == 4 || uFace == 5) {
       materialUv = halfEyeUv(uFace - 4, p);
       c = texture(uTex, materialUv);
@@ -348,6 +362,7 @@ export function createRenderer(engine, rig) {
       if (opts.halfEye !== undefined) faceMode = 4 + opts.halfEye;
       if (opts.eyeWhite !== undefined) faceMode = 6 + opts.eyeWhite;
       if (opts.eyeIris !== undefined) faceMode = 8 + opts.eyeIris;
+      if (opts.cheek !== undefined) faceMode = 10 + opts.cheek;
       const layer = { name, image: img, mesh, tex: this.texture(img), vao, posBuf, uvBuf, triBuf, lineBuf, visible: true, faceMode, color: opts.color || [1, 1, 1, 1] };
       this.layers.push(layer);
       return layer;
@@ -456,6 +471,7 @@ export function createRenderer(engine, rig) {
       gl.uniform4f(m.u.uMouthState, state.mouthOpen, state.mouthForm, MOUTH.bow, 0);
       gl.uniform4f(m.u.uCheeks, CHEEKS[0][0], CHEEKS[0][1], CHEEKS[1][0], CHEEKS[1][1]);
       gl.uniform1f(m.u.uCheek, state.cheek);
+      if (m.u.uPull) gl.uniform4fv(m.u.uPull, state.cheekPull ?? NO_PULL);
       gl.activeTexture(gl.TEXTURE0);
 
       for (const L of this.layers) {

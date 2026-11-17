@@ -4,7 +4,7 @@
 Run with: uv run --with numpy --with pillow --with opencv-python-headless
           tools/build-layers.py <project-dir> [--rig rig.draft.json]
           [--hairmask mask.png] [--cloth-under keep|hem [--hem-legs legs.png]] [--open-eyes] [--head-layers]
-          [--head-plate plate.png --head-footprint mask.png]
+          [--head-plate plate.png --head-footprint mask.png] [--cheek-pull]
 
 --hairmask takes the hair mask from a file (white is hair, exactly the size of source.png) instead of
 clustering hair colours. --cloth-under keep makes base_cloth.png the base with the garments kept: nothing
@@ -21,6 +21,9 @@ plate instead of by colour (see tools/head/plate.py): the plate is the picture w
 (source size; its alpha says where it is defined), the footprint says where that hair is (white, source size). The
 hair is then lifted off the plate exactly, the eye layers are cut from the face without that hair, and
 eye0_open_under.png / eye1_open_under.png are the open-eye layers of that face (with --open-eyes).
+--cheek-pull also cuts cheek_left.png and cheek_right.png and writes "cheeks" in layers.json (see tools/head/cheeks.py):
+the skin of each cheek from the face's outer contour inwards, which runtimes that know them pull past the contour; a side
+whose contour cannot be traced is left out with the reason on stderr (older runtimes ignore them; base.png is the same).
 Without these options the output is unchanged.
 
 An eye with `iris` in the rig (the iris outline as an ellipse) also gets eye{i}_white.png and eye{i}_iris.png (see
@@ -64,6 +67,8 @@ _limb_layers = None
 HEAD_LAYERS = Path(__file__).resolve().parent / "head" / "layers.py"
 HEAD_PLATE = Path(__file__).resolve().parent / "head" / "plate.py"
 IRIS_LAYERS = Path(__file__).resolve().parent / "eye" / "iris.py"
+CHEEK_PULL = Path(__file__).resolve().parent / "head" / "cheeks.py"
+_cheek_pull = None
 HEM_BAND = Path(__file__).resolve().parent / "cloth" / "hem.py"
 _hem_band = None
 _head_layers = None
@@ -133,6 +138,22 @@ def head_layers():
             sys.dont_write_bytecode = previous
         _head_layers = module
     return _head_layers
+
+
+def cheek_pull():
+    """tools/head/cheeks.py, loaded from this folder without writing bytecode (only --cheek-pull needs it)."""
+    global _cheek_pull
+    if _cheek_pull is None:
+        spec = importlib.util.spec_from_file_location("mesh_avatar_cheek_pull", CHEEK_PULL)
+        module = importlib.util.module_from_spec(spec)
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        _cheek_pull = module
+    return _cheek_pull
 
 
 def limb_layers():
@@ -815,7 +836,7 @@ def read_plate(path, size):
 
 
 def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False, head=False, plate=None, footprint=None,
-          hem_legs=None):
+          hem_legs=None, cheeks=False):
     source = project / "source.png"
     rig_bytes = rig_path.read_bytes()
     rig = json.loads(rig_bytes)
@@ -839,6 +860,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         options += b"head-layers:" + HEAD_LAYERS.read_bytes()
     if plate is not None:
         options += b"head-plate:" + HEAD_LAYERS.read_bytes() + HEAD_PLATE.read_bytes() + Path(plate).read_bytes() + Path(footprint).read_bytes()
+    if cheeks:
+        options += b"cheek-pull:" + CHEEK_PULL.read_bytes()
     if rig.get("limbs"):  # only rigs with limbs depend on the limb cutter
         options += b"limbs:" + LIMB_LAYERS.read_bytes()
     if any(eye.get("iris") is not None for eye in rig["eyes"]):  # only eyes with an iris depend on the iris cutter
@@ -1007,6 +1030,30 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         cut, head_note = head_layers().cut(drawn, rig, images["hairmask"], tools, outside, external_hair)
         for name, (image, rect) in (cut or {}).items():
             store(name, image, rect)
+    cheek_notes = []
+    if cheeks:
+        # cheek layers (tools/head/cheeks.py): cut from the face under the hair in front of it, which keeps its own
+        # layer; any other hair stops the contour and, lying over a cheek, shortens its travel
+        drawn = images.get("base_bare", images.get("base_cloth", images["base"]))
+        head_full = None
+        if "hair_front" in meta["layers"] and "face_skin" in meta["layers"]:
+            head_full = {}
+            for name, key in (("hair_front", "hair"), ("face_skin", "skin")):
+                x, y, lw, lh = meta["layers"][name]
+                head_full[key] = np.zeros((h, w, 4), np.uint8)
+                head_full[key][y : y + lh, x : x + lw] = images[name]
+        outside = (remove | accessory_bg | limbs) > 0
+        for cloth in rig.get("cloth", []):
+            outside |= polygon_mask((h, w), cloth["outline"]) > 0
+        cut, data, cheek_notes, head_full = cheek_pull().cut(drawn, images["hairmask"], rig, outside, polygon_mask, head_full)
+        for name, (image, rect) in cut.items():
+            store(name, image, rect)
+        if data:
+            meta["cheeks"] = data
+            if head_full is not None:
+                # the contour's own drawn line moved from the hair layer to the skin under it (same picture at rest)
+                for name, key in (("hair_front", "hair"), ("face_skin", "skin")):
+                    store(name, *head_layers()._crop(head_full[key], head_full[key][..., 3]))
 
     # Calculate everything before replacing files. Keep sprites and unrelated
     # assets intact; only filenames in this build's manifest are consumed.
@@ -1030,6 +1077,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         print(f"build-layers: head layers left out: {head_note}", file=sys.stderr)
     for note in iris_notes:
         print(f"build-layers: iris layers left out: {note}", file=sys.stderr)
+    for note in cheek_notes:
+        print(f"build-layers: cheek layers left out: {note}", file=sys.stderr)
     print(
         json.dumps({"build": build_id, "size": [w, h], "layers": list(meta["layers"])})
     )
@@ -1086,6 +1135,13 @@ def main():
         type=Path,
         help="where the hair missing from --head-plate is (PNG, white is hair, source size)",
     )
+    parser.add_argument(
+        "--cheek-pull",
+        action="store_true",
+        help="also cut cheek_left.png and cheek_right.png, the skin of each cheek from the face's contour inwards, with "
+        "which newer runtimes pull a cheek past the contour (a side is left out, with the reason on stderr, when its "
+        "contour cannot be traced)",
+    )
     args = parser.parse_args()
     if (args.head_plate is None) != (args.head_footprint is None):
         parser.error("--head-plate and --head-footprint go together")
@@ -1094,7 +1150,7 @@ def main():
     try:
         build(
             args.project_dir, args.project_dir / args.rig, args.hairmask, args.cloth_under, args.open_eyes, args.head_layers,
-            args.head_plate, args.head_footprint, args.hem_legs,
+            args.head_plate, args.head_footprint, args.hem_legs, args.cheek_pull,
         )
     except (OSError, ValueError, KeyError, TypeError, cv2.error) as error:
         print(f"build-layers: {error}", file=sys.stderr)

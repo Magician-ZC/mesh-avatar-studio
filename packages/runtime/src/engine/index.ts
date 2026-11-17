@@ -6,8 +6,9 @@ import { OVERLAY_EXPRESSIONS } from './expression-overlay.js';
 import type { LipSyncSettings } from './lip-sync';
 import type { ExpressionSettings } from './expression-settings';
 import type { ImpulseTarget } from '../interaction/impulse';
+import type { GrabTarget } from '../interaction/grab';
 
-export type { ImpulseTarget };
+export type { ImpulseTarget, GrabTarget };
 export type LiveExpression = keyof typeof OVERLAY_EXPRESSIONS;
 export const LIVE_EXPRESSIONS = Object.keys(OVERLAY_EXPRESSIONS) as LiveExpression[];
 
@@ -69,6 +70,38 @@ export interface MeshAvatar {
    * it the whole hem moves. WebGL runtime only.
    */
   impulse(target: ImpulseTarget, vx: number, vy: number): void;
+  /**
+   * Whether this avatar can pull a cheek: it was built with cheek layers (`build-layers.py --cheek-pull`) and they
+   * loaded. False for other avatars, which draw exactly as before. For one side use
+   * `canGrab({ kind: 'cheek', side })`. WebGL runtime only.
+   */
+  readonly cheekPull: boolean;
+  /**
+   * Hold a part at the pointer until `releaseGrab`: `x, y` is the press in source pixels (see `toImagePoint`). Returns a
+   * positive handle, or null when this avatar cannot grab the target (it lacks the data, the name is unknown or the
+   * input is not finite). A new grab of the same part replaces the old one, whose handle then goes stale.
+   * - `cheek`: the cheek layers of that side (left/right in the image; see `cheekPull`). A pull moves the face's outer
+   *   contour outwards in an arc while the eyes, nose, chin and the other side stay; depth swells and lights the skin.
+   * - `strand`: the hair strand of that name nearest the press, its node nearest the press held at the pointer.
+   * - `cloth`: the garment's hem at `at` (0–1 along it; nearest the press when omitted) held towards the pointer, never
+   *   beyond the garment's own hem travel (`cloth[].max`) and never lifted.
+   * - `limb`: the limb chain swings (and bends, held below its middle joint) towards the pointer, within its limits.
+   * - `accessory`: a hanging tassel (`rig.accessories`) points from its knot towards the pointer.
+   * WebGL runtime only.
+   */
+  grab(target: GrabTarget, x: number, y: number): number | null;
+  /** Whether `grab(target, ...)` would hold something on this avatar. WebGL runtime only. */
+  canGrab(target: GrabTarget): boolean;
+  /**
+   * Move a held part: the pointer's offset from the press in source pixels and, for cheeks, a depth from -1 to 1
+   * (towards the camera > 0; other parts ignore it). Holding still keeps the shape. Unknown handles are ignored.
+   */
+  moveGrab(handle: number, dx: number, dy: number, depth?: number): void;
+  /**
+   * Let go: the part returns through its own dynamics, starting with the velocity (source px/s, bounded per part).
+   * Unknown or stale handles are ignored; `destroy` lets go of everything.
+   */
+  releaseGrab(handle: number, vx?: number, vy?: number): void;
   advance(seconds: number, fps?: number): void;
   advanceParameters(seconds: number): void;
   destroy(): void;

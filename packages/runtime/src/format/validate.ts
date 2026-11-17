@@ -1,6 +1,7 @@
 import { validateRig } from '../rig/validate.ts';
 import type { Rig } from '../rig/types';
 import { parseManifest } from './manifest.ts';
+import { CHEEK_SIDES, cheekProblems } from '../interaction/cheek.ts';
 
 type FileData = Uint8Array | { size: number };
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -91,6 +92,15 @@ export function validateAvatarFiles(files: Record<string, FileData>): string[] {
       if (typeof meta.bare !== 'string' || !/^[A-Za-z0-9_-]+$/.test(meta.bare)) errors.push('built/layers.json.bare: expected a safe layer name');
       else image(`built/${meta.bare}.png`);
     } else if (rig?.limbs?.length) errors.push('built/layers.json.bare: required for rig.limbs (the base without the limbs)');
+    // T-ER12: optional cheek pull data; every side it lists needs its cheek layer
+    if (meta.cheeks !== undefined) {
+      errors.push(...cheekProblems(meta.cheeks, 'built/layers.json.cheeks'));
+      if (object(meta.cheeks) && rectangles) {
+        for (const side of CHEEK_SIDES) {
+          if (meta.cheeks[side] !== undefined && !own(rectangles, `cheek_${side}`)) errors.push(`built/layers.json.layers.cheek_${side}: required for cheeks.${side}`);
+        }
+      }
+    }
     if (!Array.isArray(meta.eyes) || meta.eyes.length !== 2) {
       errors.push('built/layers.json.eyes: expected two eye curves');
     } else meta.eyes.forEach((eye: unknown, i: number) => {

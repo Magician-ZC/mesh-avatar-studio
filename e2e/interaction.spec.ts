@@ -147,3 +147,60 @@ test('an impulse sways a hair strand, which comes back to the undisturbed frame'
   expect(result.swaying).toBeGreaterThan(500);
   expect(result.settled).toBe(0);
 });
+
+test('a held strand stays at the pointer while held and comes back after the release; no cheek layers, no cheek pull', async ({ page }) => {
+  test.skip(!samplePresent, sampleSkipReason);
+  await blankPage(page);
+  const result = await page.evaluate(async () => {
+    const { createMeshAvatar } = await import('/packages/runtime/src/index.ts' as string) as typeof import('mesh-avatar');
+    const rig = await (await fetch('/miko-qipao/rig.json')).json();
+    const seeded = (seed: number) => () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    const random = Math.random;
+    const frames = async (hold: boolean) => {
+      Math.random = seeded(7);
+      const canvas = document.createElement('canvas');
+      canvas.style.cssText = 'width: 600px; height: 600px;';
+      document.body.replaceChildren(canvas);
+      const avatar = await createMeshAvatar(canvas, { rig, assetsBase: '/miko-qipao/built', manual: true, padTop: 0, padSide: 0 });
+      avatar.setAutoIdle(false); avatar.setAutoMotion(false);
+      const read = () => {
+        const copy = document.createElement('canvas');
+        copy.width = canvas.width; copy.height = canvas.height;
+        const context = copy.getContext('2d')!;
+        context.drawImage(canvas, 0, 0);
+        return context.getImageData(0, 0, copy.width, copy.height).data;
+      };
+      const cheek = { pull: avatar.cheekPull, grab: avatar.grab({ kind: 'cheek', side: 'left' }, 500, 500), can: avatar.canGrab({ kind: 'cheek', side: 'right' }) };
+      avatar.advance(0.5);
+      const tip = rig.strands.find((s: { name: string }) => s.name === 'sideL').nodes.at(-1);
+      const handle = hold ? avatar.grab({ kind: 'strand', name: 'sideL' }, tip[0], tip[1]) : null;
+      if (handle) avatar.moveGrab(handle, -40, 0);
+      avatar.advance(0.5);
+      const held = read();
+      avatar.advance(0.5);
+      const stillHeld = read();
+      if (handle) avatar.releaseGrab(handle, 0, 0);
+      avatar.advance(3);
+      const settled = read();
+      avatar.destroy();
+      return { held, stillHeld, settled, handle, cheek };
+    };
+    try {
+      const still = await frames(false), held = await frames(true);
+      const differing = (a: Uint8ClampedArray, b: Uint8ClampedArray, tolerance: number) => {
+        let count = 0;
+        for (let i = 0; i < a.length; i += 4) if ([0, 1, 2, 3].some(c => Math.abs(a[i + c] - b[i + c]) > tolerance)) count++;
+        return count;
+      };
+      return {
+        handle: held.handle, cheek: held.cheek, moved: differing(still.held, held.held, 8),
+        kept: differing(held.held, held.stillHeld, 8), settled: differing(still.settled, held.settled, 2),
+      };
+    } finally { Math.random = random; }
+  });
+  expect(result.cheek).toEqual({ pull: false, grab: null, can: false });
+  expect(Number.isInteger(result.handle) && result.handle! > 0).toBe(true);
+  expect(result.moved).toBeGreaterThan(300);
+  expect(result.kept).toBeLessThan(0.1 * result.moved);
+  expect(result.settled).toBe(0);
+});

@@ -137,6 +137,11 @@ export function createCloth(engine, rig) {
       return Object.hasOwn(byName, name) && clothImpulse(byName[name], at, vx, vy);
     }
 
+    /** The state of the named garment, which a grab (../interaction/grab.ts) holds at the pointer; null if unknown. */
+    garment(name) {
+      return Object.hasOwn(byName, name) ? byName[name] : null;
+    }
+
     /** Skin a layer mesh (rest/pos arrays in source px) to the named garment. */
     attach(name, mesh) {
       const g = byName[name];

@@ -988,5 +988,130 @@ class HemBandTest(unittest.TestCase):
         self.assertIn("--hem-legs small.png is 10 x 10", bad.stderr)
 
 
+class CheekLayersTest(unittest.TestCase):
+    """--cheek-pull: the skin of each cheek from the face's outer contour inwards, which newer runtimes pull past it."""
+
+    SKIN, HAIR, SIZE = HeadLayersTest.SKIN, HeadLayersTest.HAIR, HeadLayersTest.SIZE
+    run_cli, meta, layer = HeadLayersTest.run_cli, HeadLayersTest.meta, HeadLayersTest.layer
+    over = staticmethod(HeadLayersTest.over)
+
+    def setUp(self):
+        HeadLayersTest.setUp(self)
+        w, h = self.SIZE
+        # hair hanging beside the face and behind it (in the plate and the source alike), below the cap
+        behind = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(behind).ellipse((24, 30, 336, 380), fill=self.HAIR)
+        ImageDraw.Draw(behind).rectangle((0, 0, w, 140), fill=(0, 0, 0, 0))
+        for path in (self.project / "source.png", self.plate_path):
+            with Image.open(path) as image:
+                Image.alpha_composite(behind, image.convert("RGBA")).save(path)
+        with Image.open(self.plate_path) as image:
+            self.plate = image.convert("RGBA")
+        mask = Image.new("L", (w, h), 0)
+        draw = ImageDraw.Draw(mask)
+        draw.ellipse((24, 30, 336, 380), fill=255)
+        draw.rectangle((0, 0, w, 140), fill=0)
+        draw.ellipse((60, 40, 300, 330), fill=0)  # the face is in front of that hair
+        draw.pieslice((50, 24, 310, 300), 180, 360, fill=255)
+        for box in ((80, 100, 280, 166), (62, 150, 96, 250)):
+            draw.rectangle(box, fill=255)
+        self.hairmask_path = self.project / "hair.png"
+        mask.save(self.hairmask_path)
+
+    @staticmethod
+    def contour(y):
+        """x of the face's left and right contour at row y (the head ellipse)."""
+        t = (1 - ((y - 185) / 145) ** 2) ** 0.5
+        return 180 - 120 * t, 180 + 120 * t
+
+    def test_each_cheek_follows_the_contour_keeps_off_the_features_and_is_the_base_at_rest(self):
+        plain = self.run_cli("--hairmask", str(self.hairmask_path))
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        plain_meta = self.meta()
+        self.assertNotIn("cheeks", plain_meta)
+        self.assertFalse({"cheek_left", "cheek_right"} & set(plain_meta["layers"]))
+        result = self.run_cli("--hairmask", str(self.hairmask_path), "--cheek-pull")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("left out", result.stderr)
+        meta = self.meta()
+        self.assertNotEqual(meta["build"], plain_meta["build"])
+        with Image.open(self.project / "built/base.png") as image:
+            base = np.array(image.convert("RGBA"))
+        for side, index in (("left", 0), ("right", 1)):
+            data = meta["cheeks"][side]
+            self.assertGreaterEqual(len(data["edge"]), 3)
+            self.assertEqual(len(data["reach"]), len(data["edge"]))
+            self.assertGreater(data["travel"], 5)
+            ys = [y for _, y in data["edge"]]
+            self.assertEqual(ys, sorted(ys))  # top to bottom
+            self.assertGreater(ys[0], 200)  # below the eyes
+            self.assertLess(ys[-1], 313)  # above the chin
+            for (x, y), reach in zip(data["edge"], data["reach"]):
+                if side == "right" or y > 264:  # above that the lock by the left eye hangs over the contour
+                    self.assertLess(abs(x - self.contour(y)[index]), 4, (side, x, y))
+                inner = x + reach if side == "left" else x - reach
+                for left in (110, 210):  # the reach stops short of the eyes
+                    self.assertFalse(left - 8 <= inner <= left + 48 and 172 <= y <= 206, (side, inner, y))
+                self.assertGreater(((inner - 180) / 30) ** 2 + ((y - 264) / 16) ** 2, 1)  # and the mouth
+            layer = self.layer(f"cheek_{side}")
+            for x, y in ((130, 190), (230, 190), (180, 222), (180, 262)):  # eyes, nose, mouth
+                self.assertEqual(int(layer[y, x, 3]), 0)
+            # it carries the contour (and the line just outside it) and, over the base, is the base
+            x0, _ = self.contour(285)
+            if side == "left":
+                self.assertEqual(int(layer[285, int(x0) + 2, 3]), 255)
+            opaque = layer[..., 3] > 0
+            self.assertGreater(int(opaque.sum()), 500)
+            rest = self.over(base, layer)
+            self.assertLessEqual(float(np.abs(rest[..., :3] - base[..., :3]).max()), 1)
+
+    def test_hair_over_a_cheek_shortens_its_pull_or_leaves_it_out(self):
+        with Image.open(self.project / "source.png") as image:
+            source = image.convert("RGBA")
+        ImageDraw.Draw(source).rectangle((262, 210, 268, 300), fill=self.HAIR)  # a lock over the right cheek
+        source.save(self.project / "source.png")
+        with Image.open(self.hairmask_path) as image:
+            mask = image.copy()
+        ImageDraw.Draw(mask).rectangle((262, 210, 268, 300), fill=255)
+        mask.save(self.hairmask_path)
+        result = self.run_cli("--hairmask", str(self.hairmask_path), "--cheek-pull")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cheeks = self.meta()["cheeks"]
+        self.assertIn("left", cheeks)
+        if "right" in cheeks:
+            self.assertLess(cheeks["right"]["travel"], 0.8 * cheeks["left"]["travel"])
+        else:
+            self.assertIn("cheek layers left out: right: hair lies over", result.stderr)
+
+    def test_with_a_plate_the_contour_line_moves_from_the_hair_to_the_skin_and_the_picture_stays(self):
+        options = ("--hairmask", str(self.hairmask_path), "--head-plate", str(self.plate_path), "--head-footprint", str(self.footprint_path))
+        # the plate's contour is drawn with a line that the source does not have, so the matte lifts it as hair
+        draw = ImageDraw.Draw(self.plate)
+        draw.arc((60, 40, 300, 330), 100, 260, fill=(120, 70, 60, 255), width=2)
+        self.plate.save(self.plate_path)
+        with Image.open(self.project / "source.png") as image:
+            source = image.convert("RGBA")
+        ImageDraw.Draw(source).arc((60, 40, 300, 330), 100, 260, fill=(120, 70, 60, 255), width=2)
+        source.save(self.project / "source.png")
+        plain = self.run_cli(*options)
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        before = self.over(self.over(np.zeros((self.SIZE[1], self.SIZE[0], 4), np.uint8) + 255, self.layer("face_skin")), self.layer("hair_front"))
+        result = self.run_cli(*options, "--cheek-pull")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        meta = self.meta()
+        self.assertIn("left", meta["cheeks"])
+        hair, skin = self.layer("hair_front"), self.layer("face_skin")
+        after = self.over(self.over(np.zeros_like(hair) + 255, skin), hair)
+        # the same picture over anything
+        self.assertLessEqual(float(np.abs(after[..., :3] - before[..., :3]).max()), 2)
+        # the fringe and the lock stay hair in front; the hair layer keeps nothing on the cheeks' contour
+        self.assertEqual(int(hair[130, 180, 3]), 255)
+        self.assertEqual(int(hair[200, 80, 3]), 255)
+        for y in (240, 270):
+            x0, x1 = self.contour(y)
+            self.assertEqual(int(hair[y, int(round(x0)) - 1 : int(round(x0)) + 2, 3].max()), 0)
+            self.assertEqual(int(hair[y, int(round(x1)) - 1 : int(round(x1)) + 2, 3].max()), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

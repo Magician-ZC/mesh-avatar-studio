@@ -15,6 +15,8 @@ import { parseExpressionSettings } from './expression-settings.ts';
 import { MOTIONS, IDLE_MOTIONS } from './motions.js';
 import { clientToImage, imageToClient } from '../interaction/coordinates.ts';
 import { createImpulse } from '../interaction/impulse.ts';
+import { CHEEK_SIDES, CheekPull, parseCheeks } from '../interaction/cheek.ts';
+import { createGrabs } from '../interaction/grab.ts';
 import { createLimbs } from '../limbs/runtime.ts';
 
 const imageCache = new Map();
@@ -196,6 +198,39 @@ export async function createMeshAvatarImpl(canvas, options) {
   const faceSkin = head?.skin ? headLayer(FACE_SKIN, head.skin, false) : null;
   if (faceSkin) faceSkin.layer = R.addLayer(FACE_SKIN, head.skin, faceSkin.mesh);
 
+  // optional cheek layers (tools/head/cheeks.py, ../interaction/cheek.ts): drawn only while a cheek is pulled, over the
+  // base and the skin under the hair, under the eyes, the drawn mouths and the hair in front of the face
+  const cheekData = parseCheeks(meta.cheeks);
+  const cheekLayers = {};
+  for (const [i, side] of CHEEK_SIDES.entries()) {
+    const n = `cheek_${side}`;
+    if (!cheekData[side] || !meta.layers?.[n]) continue;
+    try {
+      const img = await loadImage(asset(`${n}.png`, meta.build));
+      const mesh = buildGrid(rects[n], headCell, alphaOf(img), img.width);
+      const W = [];
+      for (let k = 0; k < mesh.rest.length / 2; k++) {
+        const x = mesh.rest[k * 2], y = mesh.rest[k * 2 + 1];
+        W.push(baseWeights(x, y, hairAt(x, y)));
+      }
+      const layer = R.addLayer(n, img, mesh, { cheek: i });
+      layer.visible = false;
+      cheekLayers[side] = { mesh, W, layer };
+    } catch (err) {
+      console.warn(`cheek layer ${side} not loaded:`, err);
+    }
+  }
+  const cheeks = Object.keys(cheekLayers).length
+    ? new CheekPull(cheekData, Object.fromEntries(Object.entries(cheekLayers).map(([side, c]) => [side, c.mesh.rest])))
+    : null;
+  // two rest points on each pulled contour, whose drawn positions say where the cheek is and how it is turned
+  const cheekProbes = Object.fromEntries(CHEEK_SIDES.flatMap(side => {
+    const at = cheeks?.anchor(side);
+    if (!at) return [];
+    const below = [at[0], at[1] + 24];
+    return [[side, { at, below, w: baseWeights(at[0], at[1], 0), wb: baseWeights(below[0], below[1], 0) }]];
+  }));
+
   // eyes: white+iris clipped by the lids, then the line layers on top
   const eyeParts = [];
   EYES.forEach((e, i) => {
@@ -276,6 +311,29 @@ export async function createMeshAvatarImpl(canvas, options) {
   motion.onMotion = id => { for (const fn of listeners) fn(id); };
   // pointer interaction (ER1): only runs when impulse() is called
   const applyImpulse = createImpulse(rig, { motion, physics, cloth, limbs });
+  // the latest frame's parameters and physics output, for grabs that start or move between frames
+  let lastP = null, lastPhys = null;
+  const place = (point, weights = baseWeights(point[0], point[1], 0)) => {
+    if (!lastP) return [point[0], point[1]];
+    const out = [0, 0];
+    deformBase(point[0], point[1], weights, lastP, lastPhys, out);
+    return out;
+  };
+  const cheekFrame = side => {
+    const probe = cheekProbes[side];
+    if (!probe) return null;
+    const drawn = place(probe.at, probe.w), below = place(probe.below, probe.wb);
+    const angle = Math.atan2(below[0] - drawn[0], below[1] - drawn[1]) * -1;
+    return { rest: probe.at, drawn, angle: Number.isFinite(angle) ? angle : 0 };
+  };
+  // sustained grabs (../interaction/grab.ts): nothing runs until something is grabbed
+  const grabs = createGrabs({
+    rig, physics, cheeks, cheekFrame, place,
+    garment: name => cloth.garment(name),
+    limbs: limbs ? { chains: limbs.chains, values: (name, P) => limbs.values(name, P) } : null,
+    parameters: () => lastParameters,
+    impulse: (target, vx, vy) => applyImpulse(target, vx, vy),
+  });
 
   let parameters = {}, parameterWeight = 1, parameterWeights = {}, lastParameters = {};
   const expression = new ExpressionOverlay(options.expressions === undefined ? undefined : parseExpressionSettings(options.expressions));
@@ -295,12 +353,16 @@ export async function createMeshAvatarImpl(canvas, options) {
     }
     // Live expressions sit above tracking and lip sync; neutral leaves the parameters untouched.
     const out = expression.apply(P, dt);
+    // a held (or settling) limb follows the pointer, above everything else
+    if (grabs.active) grabs.parameters(out);
     lastParameters = out;
     return out;
   }
   function tick(dt) {
     const P = updateParameters(dt);
+    if (grabs.active) { grabs.step(dt); grabs.beforePhysics(P); }
     const phys = physics.step(P, dt);
+    lastP = P; lastPhys = phys;
 
     const bp = baseMesh.pos, br = baseMesh.rest;
     for (let i = 0; i < baseW.length; i++) {
@@ -354,6 +416,22 @@ export async function createMeshAvatarImpl(canvas, options) {
         o[k * 2] = tmp[0]; o[k * 2 + 1] = tmp[1];
       }
     }
+    // pulled cheeks: their layers take the pull in rest space, then move with the head like the base
+    if (cheeks) {
+      const angles = {};
+      for (const side of Object.keys(cheekLayers)) angles[side] = cheekFrame(side)?.angle ?? 0;
+      cheeks.step(dt, angles);
+      for (const [side, c] of Object.entries(cheekLayers)) {
+        const d = cheeks.displacement(side);
+        c.layer.visible = !!d;
+        if (!d) continue;
+        const r = c.mesh.rest, o = c.mesh.pos;
+        for (let k = 0; k < c.W.length; k++) {
+          deformBase(r[k * 2] + d[k * 2], r[k * 2 + 1] + d[k * 2 + 1], c.W[k], P, phys, tmp);
+          o[k * 2] = tmp[0]; o[k * 2 + 1] = tmp[1];
+        }
+      }
+    }
     overlays?.update(P, phys, deformBase, tmp);
     const hp = handMesh.pos, hr = handMesh.rest, HF = handFrame(P);
     for (let i = 0; i < handW.length; i++) {
@@ -361,7 +439,7 @@ export async function createMeshAvatarImpl(canvas, options) {
       hp[i * 2] = tmp[0]; hp[i * 2 + 1] = tmp[1];
     }
     physics.chains.forEach((ch, k) => deformTassel(ch, tassels[k].mesh));
-    if (CLOTH.length) { cloth.step(P, dt, phys); cloth.deform(); }
+    if (CLOTH.length) { if (grabs.active) grabs.beforeCloth(); cloth.step(P, dt, phys); cloth.deform(); }
     if (limbs) { limbs.step(dt); limbs.deform(P, phys); }
 
     R.draw({
@@ -373,6 +451,7 @@ export async function createMeshAvatarImpl(canvas, options) {
       eyeRim,
       // with sprites the drawn mouths replace the shader-painted one
       mouthOpen: cover?.mouthDrawn ? 0 : P.mouthOpen, mouthForm: P.mouthForm, cheek: P.blush,
+      cheekPull: cheeks ? [...cheeks.shading('left'), ...cheeks.shading('right')] : null,
       showMesh: false, originalAlpha: 0, joints: [],
     });
   }
@@ -395,6 +474,8 @@ export async function createMeshAvatarImpl(canvas, options) {
 
   return {
     motions: motionList,
+    /** Whether this avatar can pull a cheek (cheek layers built with --cheek-pull and loaded); per side see canGrab(). */
+    cheekPull: !!(cheeks?.has('left') || cheeks?.has('right')),
     setParameters(values, weight = 1, weights = {}) {
       parameters = { ...values }; parameterWeight = Math.min(1, Math.max(0, Number(weight) || 0));
       parameterWeights = Object.fromEntries(Object.entries(weights ?? {}).map(([key, value]) => [key, Math.min(1, Math.max(0, Number(value) || 0))]));
@@ -437,6 +518,17 @@ export async function createMeshAvatarImpl(canvas, options) {
     toClientPoint(x, y) { return destroyed ? null : imageToClient(canvas, R, x, y); },
     /** Instantaneous velocity (source px/s) for the body, head, a strand, a garment or a limb; unknown targets are ignored. */
     impulse(target, vx, vy) { if (!destroyed) applyImpulse(target, vx, vy); },
+    /**
+     * Hold a part at the pointer: a cheek, a hair strand, a garment's hem, a limb or a hanging accessory, pressed at
+     * (x, y) in source px. Returns a handle for moveGrab / releaseGrab, or null when this avatar cannot grab the target.
+     */
+    grab(target, x, y) { return destroyed ? null : grabs.grab(target, x, y); },
+    /** Whether grab(target, ...) would hold something on this avatar. */
+    canGrab(target) { return !destroyed && grabs.can(target); },
+    /** The pointer's offset from the press (source px) and, for cheeks, depth -1..1 (towards the camera > 0). */
+    moveGrab(handle, dx, dy, depth = 0) { if (!destroyed) grabs.move(handle, dx, dy, depth); },
+    /** Let go with a velocity (source px/s, bounded); unknown or stale handles are ignored. */
+    releaseGrab(handle, vx = 0, vy = 0) { if (!destroyed) grabs.release(handle, vx, vy); },
     /** Advance the simulation by `sec` and draw (for tests / hidden tabs). */
     advance(sec, fps = 60) {
       if (destroyed) return;
@@ -448,6 +540,7 @@ export async function createMeshAvatarImpl(canvas, options) {
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      grabs.releaseAll();
       cancelAnimationFrame(raf);
       listeners.clear();
       R.destroy();

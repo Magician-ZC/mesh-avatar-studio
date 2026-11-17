@@ -118,6 +118,30 @@ values are truncated; a fringe strand shares its push with the neighbouring frin
 without `at` the whole hem of a garment moves; a limb swings about its root. Unknown targets are ignored. An avatar
 that never receives an impulse renders exactly as before.
 
+### Holding a part
+
+A grab holds a part at the pointer until it is let go (WebGL runtime only):
+
+```js
+// pressed at [x, y] (source pixels): a positive handle, or null when this avatar cannot hold that part
+const handle = avatar.grab({ kind: 'cheek', side: 'left' }, x, y);
+avatar.moveGrab(handle, dx, dy, depth);   // offset from the press in source pixels; depth -1..1, towards the camera > 0
+avatar.releaseGrab(handle, vx, vy);       // let go with a velocity in source px/s (bounded per part)
+```
+
+| Target | Held how |
+| --- | --- |
+| `{ kind: 'cheek', side: 'left' \| 'right' }` | The face's outer contour on that side of the image is pulled outwards in an arc, the skin inside it following; the eyes, nose, mouth, chin and the other side stay. A pull inwards or along the contour moves only the skin inside it. Depth swells and lights the skin around the press. Needs cheek layers (`build-layers.py --cheek-pull`); `avatar.cheekPull` says whether this avatar has any, `canGrab` tells the sides apart. |
+| `{ kind: 'strand', name }` | The strand of that name nearest the press is held at the pointer by its node nearest the press, within the strand's own reach (`rig.strands[i].max`); the rest of it follows by its springs. |
+| `{ kind: 'cloth', name, at? }` | The hem at `at` (0–1 along it; nearest the press when omitted) leans towards the pointer, never beyond the garment's own hem travel (`max`) and never lifted. |
+| `{ kind: 'limb', name }` | The limb chain swings, and bends when held below its middle joint, towards the pointer within its limits. |
+| `{ kind: 'accessory', name }` | A hanging tassel (`rig.accessories[i].name`) points from its knot towards the pointer within its swing. |
+
+Holding still keeps the shape. Hair in front of the face stays in front of a pulled cheek. Blinking, gaze, the mouth and
+head turns keep working while a part is held, and a released part returns through its own dynamics (a cheek to the face
+the head pose has now). A new grab of the same part takes it over; unknown or stale handles are ignored; `destroy` lets
+go of everything. An avatar without cheek layers draws exactly as before.
+
 ## Mouth movement
 
 Three optional settings control audio loudness lip sync and kana previews. `granularity`

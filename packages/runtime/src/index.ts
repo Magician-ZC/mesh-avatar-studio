@@ -1,5 +1,5 @@
 export { createMeshAvatar, LIVE_EXPRESSIONS } from './engine';
-export type { MeshAvatar, MeshAvatarOptions, LiveExpression, ImpulseTarget } from './engine';
+export type { MeshAvatar, MeshAvatarOptions, LiveExpression, ImpulseTarget, GrabTarget } from './engine';
 export type { LipSyncSettings } from './engine/lip-sync';
 export type { ExpressionSettings, ExpressionMouthSettings } from './engine/expression-settings';
 export type { Rig, Eye, Strand, Accessory, Hand, Arm, Arms, Leg, Legs, Limb, Cloth, ClothTuning, Ellipse, Point, Band, HitZone } from './rig/types';
