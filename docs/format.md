@@ -46,6 +46,14 @@ clothed illustration. `pack-avatar` includes both bases and the garment cutouts.
 The optional editing input `source_under.png` has the same dimensions and alignment
 as `source.png`, with only garments removed; it is not needed for playback and is
 not included by `pack-avatar`. Without it the layer builder inpaints the covered area.
+With `build-layers.py --cloth-under keep`, `base_cloth.png` keeps the garments; with
+`--cloth-under hem` it keeps them too, except a band along each front garment's free
+edges (as deep as the garment's travel `cloth[*].max` allows at its lowest point, none at
+its waist), which is transparent or, under the hem, continues the legs that come out
+below it; there the garment layer also takes the garment's drawn edge, cut hard, so at
+rest the two are the picture. `layers.json` then holds `clothUnder`: `{ "mode": "hem",
+"garments": { <name>: { "band", "pixels", "legs", "top" } } }` (the band's depth at the hem
+in px, its pixels, the pixels continuing a leg, its first row). Players do not read it.
 
 ## Manifest: `avatar.json`
 

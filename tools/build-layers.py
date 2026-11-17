@@ -3,12 +3,15 @@
 
 Run with: uv run --with numpy --with pillow --with opencv-python-headless
           tools/build-layers.py <project-dir> [--rig rig.draft.json]
-          [--hairmask mask.png] [--cloth-under keep] [--open-eyes] [--head-layers]
+          [--hairmask mask.png] [--cloth-under keep|hem [--hem-legs legs.png]] [--open-eyes] [--head-layers]
           [--head-plate plate.png --head-footprint mask.png]
 
 --hairmask takes the hair mask from a file (white is hair, exactly the size of source.png) instead of
 clustering hair colours. --cloth-under keep makes base_cloth.png the base with the garments kept: nothing
-is redrawn or inpainted under them and source_under.png is not read. --open-eyes also cuts eye0_open.png and
+is redrawn or inpainted under them and source_under.png is not read. --cloth-under hem keeps the garments too, except
+a band along each garment's free edges that the garment uncovers when it swings (see tools/cloth/hem.py): there the base
+is transparent, or, with --hem-legs (white = legs, source size), continues the legs that come out under the hem; the
+band follows the garment's own travel (cloth[*].max) and nothing in it is generated. --open-eyes also cuts eye0_open.png and
 eye1_open.png: the source pixels around each eye, with a hole for the eye ball, which runtimes that know them
 show while the eye is fully open (older runtimes ignore them). --head-layers also cuts face_field.png, hair_front.png
 and face_skin.png (see tools/head/layers.py): with them a head turn slides the face under the hair instead of bulging
@@ -61,9 +64,27 @@ _limb_layers = None
 HEAD_LAYERS = Path(__file__).resolve().parent / "head" / "layers.py"
 HEAD_PLATE = Path(__file__).resolve().parent / "head" / "plate.py"
 IRIS_LAYERS = Path(__file__).resolve().parent / "eye" / "iris.py"
+HEM_BAND = Path(__file__).resolve().parent / "cloth" / "hem.py"
+_hem_band = None
 _head_layers = None
 _head_plate = None
 _iris_layers = None
+
+
+def hem_band():
+    """tools/cloth/hem.py, loaded from this folder without writing bytecode (only --cloth-under hem needs it)."""
+    global _hem_band
+    if _hem_band is None:
+        spec = importlib.util.spec_from_file_location("mesh_avatar_hem_band", HEM_BAND)
+        module = importlib.util.module_from_spec(spec)
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        _hem_band = module
+    return _hem_band
 
 
 def iris_layers():
@@ -509,7 +530,7 @@ def hand_prefill(rgba, remove, hand):
     return prefill, painted
 
 
-def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto"):
+def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", legs=None, covered=None, notes=None):
     """Cut each garment into its own layer and write base_cloth.png without them.
 
     base.png keeps the garments, so runtimes that do not know rig.cloth still draw them.
@@ -519,12 +540,15 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto"):
     the under drawing wherever the two differ. Without it, the outline area is inpainted.
     With cloth_under="keep", base_cloth is the base with the garments kept: nothing is
     drawn or inpainted under them and source_under.png is never read.
+    With cloth_under="hem", the same, except each front garment's hem band (tools/cloth/hem.py): there base_cloth is
+    transparent or continues the legs below the hem (`legs`), and the garment layer takes its drawn edge along the band,
+    cut hard. `covered` (hand, accessories) stays out of the band. `notes` receives what each band holds.
     """
     h, w = rgba.shape[:2]
     shape = (h, w)
     under = None
     under_path = project / "source_under.png"
-    if cloth_under != "keep" and under_path.exists():
+    if cloth_under not in ("keep", "hem") and under_path.exists():
         with Image.open(under_path) as image:
             under = np.array(image.convert("RGBA"))
         if under.shape != rgba.shape:
@@ -547,16 +571,33 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto"):
         if not cloth.get("behind"):
             front |= masks[cloth["name"]]
     taken = np.zeros(shape, np.uint8)
+    bands = []
     for cloth in rig["cloth"]:
         # a garment behind another loses what the front one covers; overlapping
         # outlines of the same depth keep each pixel in the first garment only
         mask = masks[cloth["name"]] & ~taken
         if cloth.get("behind"):
             mask &= ~front
+        if cloth_under == "hem" and not cloth.get("behind"):
+            others = np.zeros(shape, np.uint8)
+            for other in rig["cloth"]:
+                if other["name"] != cloth["name"]:
+                    others |= masks[other["name"]]
+            keep_out = (others | taken | (covered if covered is not None else 0)) > 0
+            region, band, fill, report = hem_band().band(rgba, mask, cloth, legs, keep_out)
+            mask = region.astype(np.uint8) * 255
+            bands.append((band, fill))
+            if notes is not None:
+                notes[cloth["name"]] = report
+            taken |= mask
+            store(f"cloth_{cloth['name']}", *crop_layer(rgba, mask, soft=False))
+            continue
         taken |= mask
         store(f"cloth_{cloth['name']}", *crop_layer(rgba, mask))
-    if cloth_under == "keep":
+    if cloth_under in ("keep", "hem"):
         bare = base.copy()
+        for band, fill in bands:
+            bare[band] = fill[band]
     elif under is not None:
         bare = base.copy()
         replace = (diff > 0) | (cv2.dilate(taken, np.ones((3, 3), np.uint8)) > 0)
@@ -754,12 +795,12 @@ def open_eye_layer(rgba, eye, covered, exact=False, matte=None):
     return crop_layer(layer, (layer[..., 3] > 0).astype(np.uint8) * 255, pad=1, soft=False)
 
 
-def read_hairmask(path, size):
-    """An external hair mask: grayscale (or RGB) PNG, white where hair is, exactly the source size."""
+def read_hairmask(path, size, option="--hairmask"):
+    """An external mask (hair, legs): grayscale (or RGB) PNG, white where it is, exactly the source size."""
     with Image.open(path) as image:
         if image.size != size:
             raise ValueError(
-                f"--hairmask {path.name} is {image.size[0]} x {image.size[1]}, "
+                f"{option} {path.name} is {image.size[0]} x {image.size[1]}, "
                 f"source.png is {size[0]} x {size[1]}"
             )
         return np.array(image.convert("L"))
@@ -773,7 +814,8 @@ def read_plate(path, size):
         return np.array(image.convert("RGBA"))
 
 
-def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False, head=False, plate=None, footprint=None):
+def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False, head=False, plate=None, footprint=None,
+          hem_legs=None):
     source = project / "source.png"
     rig_bytes = rig_path.read_bytes()
     rig = json.loads(rig_bytes)
@@ -789,6 +831,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         options += b"hairmask:" + hairmask.read_bytes()
     if cloth_under != "auto":
         options += f"cloth-under:{cloth_under}".encode()
+    if cloth_under == "hem":
+        options += b"hem:" + HEM_BAND.read_bytes() + (b"legs:" + Path(hem_legs).read_bytes() if hem_legs is not None else b"")
     if open_eyes:
         options += b"open-eyes"
     if head:
@@ -922,7 +966,11 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
     images["base"] = base
     images["hairmask"] = hair_mask(rgba, rig, external_hair)
     if rig.get("cloth"):
-        build_cloth(project, rig, rgba, base, store, images, cloth_under)
+        legs = read_hairmask(hem_legs, (w, h), "--hem-legs") if hem_legs is not None else None
+        hems = {}
+        build_cloth(project, rig, rgba, base, store, images, cloth_under, legs, remove | accessory_bg, hems)
+        if cloth_under == "hem":
+            meta["clothUnder"] = {"mode": "hem", "garments": hems}
     limbs = np.zeros((h, w), np.uint8)
     if rig.get("limbs"):
         # the runtime base is base_cloth with garments, base otherwise; base_bare is that without the limbs
@@ -1004,10 +1052,16 @@ def main():
     )
     parser.add_argument(
         "--cloth-under",
-        choices=("auto", "keep"),
+        choices=("auto", "keep", "hem"),
         default="auto",
-        help="keep: base_cloth.png keeps the garments, without inpainting or source_under.png "
+        help="keep: base_cloth.png keeps the garments, without inpainting or source_under.png; hem: the same, except a "
+        "band along each garment's hem that it uncovers when it swings, transparent or continuing the legs below "
         "(default auto: source_under.png if present, else inpaint)",
+    )
+    parser.add_argument(
+        "--hem-legs",
+        type=Path,
+        help="with --cloth-under hem: where legs are (PNG, white, source size); under the hem the band continues them",
     )
     parser.add_argument(
         "--open-eyes",
@@ -1035,10 +1089,12 @@ def main():
     args = parser.parse_args()
     if (args.head_plate is None) != (args.head_footprint is None):
         parser.error("--head-plate and --head-footprint go together")
+    if args.hem_legs is not None and args.cloth_under != "hem":
+        parser.error("--hem-legs goes with --cloth-under hem")
     try:
         build(
             args.project_dir, args.project_dir / args.rig, args.hairmask, args.cloth_under, args.open_eyes, args.head_layers,
-            args.head_plate, args.head_footprint,
+            args.head_plate, args.head_footprint, args.hem_legs,
         )
     except (OSError, ValueError, KeyError, TypeError, cv2.error) as error:
         print(f"build-layers: {error}", file=sys.stderr)
