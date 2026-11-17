@@ -557,6 +557,22 @@ class HeadLayersTest(unittest.TestCase):
         self.assertEqual(hair[178, 240].tolist(), list(self.HAIR))
         self.assertEqual(hair[188, 240].tolist(), list(self.HAIR))
 
+    def test_a_strand_left_on_the_face_stays_in_the_resting_picture(self):
+        # the same strand, not on the footprint: by the eye only hair on the footprint is lifted, so its tip stays on the
+        # face - and the plate must not stand in for it under the fringe's rim, or it would vanish from the resting picture
+        with Image.open(self.project / "source.png") as image:
+            source = image.convert("RGBA")
+        ImageDraw.Draw(source).rectangle((236, 150, 244, 190), fill=self.HAIR)
+        source.save(self.project / "source.png")
+        result = self.run_cli("--open-eyes", "--head-plate", str(self.plate_path), "--head-footprint", str(self.footprint_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        skin, hair = self.layer("face_skin"), self.layer("hair_front")
+        for y in range(169, 174):  # below the fringe, inside the eye's region
+            self.assertEqual((int(hair[y, 240, 3]), int(skin[y, 240, 3])), (0, 0), y)
+        # hair over the face without it gives back the source everywhere the hair layer reaches
+        meta = json.loads((self.project / "built/layers.json").read_text())
+        self.assertLess(meta["head"]["restMean"], 1.0)
+
     def test_a_plate_that_is_no_plate_leaves_the_head_layers_out_and_says_why(self):
         # the "plate" still has the hair: nothing can be lifted
         with Image.open(self.project / "source.png") as image:

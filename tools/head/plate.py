@@ -28,6 +28,10 @@ MIN_CONTRAST = 28.0  # hair and plate closer than this (RGB distance) cannot be 
 SOLID = 0.9  # alpha from which a pixel counts as hair entirely
 SAME = 16.0  # source and plate closer than this (RGB distance) are the same pixel: it is the plate
 NOISE = 0.08  # alpha below this is plate noise
+KEEP = 8  # 8-bit levels: where nothing is lifted, the plate may stand in for the source only this close to it
+EDGE = 16  # 8-bit levels: a soft hair pixel whose hair over the layer below is further from the source is left to the source
+LIFT = 0.1  # a pixel the plate would hide is hair if its source lies at least this far from the plate towards the hair colour
+PLAUSIBLE = 90  # RGB distance from the local hair colour within which a hair pixel's colour is one hair can have
 
 
 def _blur(image, sigma):
@@ -122,14 +126,17 @@ def matte(source_rgb, plate_rgb, footprint, valid, features=None):
     return alpha.astype(np.float32), hair, None
 
 
-def lift(source, plate_rgb, alpha, hair_colour, moving, valid):
+def lift(source, plate_rgb, alpha, hair_colour, moving, valid, features=None):
     """The hair layer and the under layer of `source` (RGBA) for hair alpha `alpha` over `plate_rgb`.
 
     moving: where a head turn slides the picture (the face field > 0). Returns (hair RGBA, under RGBA, under weight).
     hair_colour is the local hair colour from matte(). Two nested zones around the moving face keep the resting picture
     the source: the hair layer fades in over the outermost FADE px of its reach, where the layer below is still the
     source itself (hair on its own hair); only further in, where the hair layer is complete, does the layer below
-    become the plate. Solid hair pixels reproduce the source exactly; soft ones to the matting residual.
+    become the plate. Solid hair pixels reproduce the source exactly, soft ones as closely as a colour hair can have
+    allows. The plate never hides what the matte did not lift: such a pixel is lifted after all where it is hair, and
+    keeps the source below where it is not, and by the eyes (features: where only hair on the footprint is lifted, and a
+    lash put on the hair layer would stay behind when the face turns).
     """
     src = source[..., :3].astype(np.float32)
     plate = plate_rgb.astype(np.float32)
@@ -146,6 +153,14 @@ def lift(source, plate_rgb, alpha, hair_colour, moving, valid):
     weight = rim * np.clip((depth - FADE - 2) / UNDER_FEATHER, 0, 1)
     # never the plate's own backdrop, nor anything outside the plate
     weight[(cv2.dilate(backdrop(plate_rgb, valid).astype(np.uint8), np.ones((7, 7), np.uint8)) > 0) | ~valid] = 0
+    # where nothing is lifted, the plate stands in for the source only if it is the source to within KEEP: a strand tip the
+    # matte left out (a speck of soft alpha, or outside the footprint) or a lash would vanish from the resting picture.
+    # By the eyes (the features, where only hair on the footprint is lifted) the source stays below; elsewhere such a
+    # pixel is lifted after all, below
+    near_eyes = features if features is not None else np.zeros(alpha.shape, bool)
+    hidden = (alpha <= 0) & (weight > 0) & (np.abs(src - plate).max(-1) > KEEP)
+    weight[hidden & near_eyes] = 0
+    hidden &= ~near_eyes
     under = source.copy()
     under_rgb = src * (1 - weight[..., None]) + plate * weight[..., None]
     under[..., :3] = np.clip(np.rint(under_rgb), 0, 255).astype(np.uint8)
@@ -153,9 +168,43 @@ def lift(source, plate_rgb, alpha, hair_colour, moving, valid):
     # out, so that hair over under is the source again - unless that gives a colour no hair has (a nearly transparent
     # pixel does, and it would show once the face has moved): then the hair's local colour
     under_drawn = under[..., :3].astype(np.float32)
+    if np.any(hidden):
+        # on the line from the layer below to the local hair colour, the point nearest to the source
+        towards = hair_colour - under_drawn
+        t = np.clip(np.sum((src - under_drawn) * towards, axis=-1) / np.maximum(np.sum(towards * towards, axis=-1), 1.0), 0, 1)
+        # one that is no hair (no nearer the hair colour than the plate: skin detail the plate lacks) keeps the source below
+        skin = hidden & (t < LIFT)
+        weight = np.where(skin, 0.0, weight)
+        under[skin, :3] = source[skin, :3]
+        under_drawn = under[..., :3].astype(np.float32)
+        a = np.where(hidden & ~skin, t * margin, a)
     exact = (src - (1 - a[..., None]) * under_drawn) / np.maximum(a[..., None], 0.05)
-    plausible = (np.linalg.norm(exact - hair_colour, axis=-1) < 90) & (exact.min(-1) >= 0) & (exact.max(-1) <= 255)
+    plausible = (np.linalg.norm(exact - hair_colour, axis=-1) < PLAUSIBLE) & (exact.min(-1) >= 0) & (exact.max(-1) <= 255)
     colour = np.where((a >= 0.999)[..., None], src, np.where(plausible[..., None], exact, hair_colour))
+    # where the hair's local colour stands in, its alpha is solved again against that colour (the point on the line from
+    # the layer below to it nearest to the source), so hair over the layer below stays as close to the source as that
+    # colour allows; over the eyes never more hair than the matte found, or it would stay behind when the face turns
+    swapped = (a > 0) & (a < 0.999) & ~plausible
+    if np.any(swapped):
+        # the plausible colour nearest to the exact one: towards the local hair colour until within PLAUSIBLE of it
+        off_hair = exact - hair_colour
+        reach = np.linalg.norm(off_hair, axis=-1, keepdims=True)
+        nearest = np.clip(hair_colour + off_hair * np.minimum(1.0, PLAUSIBLE / np.maximum(reach, 1e-6)), 0, 255)
+        colour = np.where(swapped[..., None], nearest, colour)
+        towards = nearest - under_drawn
+        refit = np.clip(np.sum((src - under_drawn) * towards, axis=-1) / np.maximum(np.sum(towards * towards, axis=-1), 1.0), 0, 1)
+        if features is not None:
+            refit = np.where(features, np.minimum(refit, a), refit)
+        a = np.where(swapped, refit, a)
+    # by the eyes, a soft pixel that no hair colour and alpha give back (a highlight lighter than both sides, another hue)
+    # is left to the source: no hair there, the source below - a speck that moves with the face rather than a wrong
+    # colour in the resting picture next to the eye
+    drawn = under_drawn * (1 - a[..., None]) + colour * a[..., None]
+    off = near_eyes & (alpha > 0) & (a < 0.999) & (np.abs(drawn - src).max(-1) > EDGE)
+    if np.any(off):
+        a = np.where(off, 0.0, a)
+        weight = np.where(off, 0.0, weight)
+        under[off, :3] = source[off, :3]
     hair = source.copy()
     hair[..., :3] = np.clip(np.rint(colour), 0, 255).astype(np.uint8)
     hair[..., 3] = np.clip(np.rint(source[..., 3].astype(np.float32) * a), 0, 255).astype(np.uint8)
@@ -219,7 +268,7 @@ def cut(source, rig, plate_rgba, footprint, frame_of, field_of, moving_floor, ou
     alpha, hair_colour, reason = matte(np.ascontiguousarray(source[..., :3]), plate_rgb, footprint.astype(np.float32) / 255, valid, features)
     if alpha is None:
         return None, reason
-    hair, under, weight = lift(source, plate_rgb, alpha, hair_colour, moving, valid)
+    hair, under, weight = lift(source, plate_rgb, alpha, hair_colour, moving, valid, features)
     lifted = float(((hair[..., 3] > 0) & moving).sum() / max(1, int(moving.sum())))
     if lifted < MIN_LIFTED:
         return None, "no hair in front of the face"
