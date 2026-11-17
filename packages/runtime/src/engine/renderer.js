@@ -157,8 +157,8 @@ export function createRenderer(engine, rig) {
     vec4 s = uPull[side];
     if (s.w == 0.0 || s.z <= 0.0) return c;
     vec2 q = (p - s.xy) / s.z;
-    float lift = s.w * exp(-dot(q, q)) * (0.05 - 0.22 * q.y);
-    c.rgb = clamp(c.rgb * (1.0 + lift), 0.0, c.a);
+    float lift = s.w * exp(-3.0 * dot(q, q)) * (0.06 - 0.3 * q.y);
+    c.rgb = lift > 0.0 ? mix(c.rgb, vec3(c.a), lift) : c.rgb * (1.0 + lift);
     return c;
   }
 

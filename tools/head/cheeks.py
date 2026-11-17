@@ -281,15 +281,17 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
 
         # rows that end well inside the contour because hair lies over it (not a shadow or a line on the cheek)
         inward = np.array([inward[k] and math.isfinite(edges[k]) and at_hair(rect_hair, row, edges[k]) for k, row in enumerate(rows)])
-        hidden = np.zeros(len(rows), bool)
+        hidden, seen_edges = np.zeros(len(rows), bool), np.full(len(rows), np.inf)
         if layered:
             seen_distance = np.linalg.norm(seen_lab - skin, axis=-1)
             for k, row in enumerate(rows):
                 edge, _ = _trace(seen_lab, seen_stop, seen_distance, row, start, sign, int(0.5 * D))
                 hidden[k] = math.isfinite(edge) and abs(edge - half) < smooth[k] - HIDDEN and at_hair(seen_front, row, abs(edge - half))
+                if hidden[k]:
+                    seen_edges[k] = abs(edge - half)
         # without head layers, hair that ends a row with skin beyond it lies over the cheek; with them that hair is lifted,
         # and only hair over the contour itself (rows ending well inside it) is left to be dragged along
-        traced[side] = (sign, smooth, (fronts if head is None else np.zeros_like(fronts)) | inward, skin, hidden | inward)
+        traced[side] = (sign, smooth, (fronts if head is None else np.zeros_like(fronts)) | inward, skin, hidden | inward, seen_edges)
         widths[side] = smooth
     if not traced:
         return {}, {}, notes, head
@@ -330,12 +332,13 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
     span = rows[: end + 1]
     t = (span - span[0]) / max(1, span[-1] - span[0])
     along = bump(t)
-    for side, (sign, smooth, fronts, skin, covered) in traced.items():
+    for side, (sign, smooth, fronts, skin, covered, seen_edges) in traced.items():
         e = smooth[: end + 1]
         # the contour stays where hair lies over it (the hair in front of the face, or any hair without head layers):
         # pulled there it would come out from under that hair
         near = cv2.dilate(covered[: end + 1].astype(np.uint8)[:, None], np.ones((2 * int(COVER_EASE * L) + 1, 1), np.uint8))[:, 0]
-        free = np.clip(1 - _smooth(near.astype(np.float64), max(2.0, 2 * COVER_EASE * L)) * 1.6, 0, 1)
+        # eased in over about one and a half travels of contour, so the pulled contour turns out of the still one gently
+        free = np.clip(1 - _smooth(near.astype(np.float64), max(2.0, 2 * COVER_EASE * L, 0.75 * travel)) * 1.2, 0, 1)
         cols = half + sign * e
         inner = np.clip(np.rint(cols - sign * 2), 0, lab.shape[1] - 1).astype(int)
         raw = clearance[span, inner]
@@ -365,7 +368,9 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
         vv_edge = np.concatenate([np.full(grow, span[0]) - np.arange(grow, 0, -1), span, span[-1] + np.arange(1, grow + 1)])
         ee = np.concatenate([np.full(grow, e[0]), e, np.full(grow, e[-1])])
         rr = np.concatenate([np.full(grow, reach[0]), reach, np.full(grow, reach[-1])])
-        outer = [_point(f, sign * (x + STROKE), y) for x, y in zip(ee, vv_edge)]
+        # where hair in front of the face hides the contour the layer ends at that hair: what lies under it is never shown
+        seen_out = np.concatenate([np.full(grow, seen_edges[0]), seen_edges[: end + 1], np.full(grow, seen_edges[end])])
+        outer = [_point(f, sign * (min(x, s) + STROKE), y) for x, s, y in zip(ee, seen_out, vv_edge)]
         inside = [_point(f, sign * max(x - r - 8, 0.0), y) for x, y, r in zip(ee, vv_edge, rr)]
         region = polygon_mask((h, w), np.rint(np.array(outer + inside[::-1])).astype(np.int32))
         soft = np.maximum(region.astype(np.float32) / 255, cv2.GaussianBlur(region.astype(np.float32) / 255, (0, 0), 1.0))

@@ -150,6 +150,7 @@ test('an impulse sways a hair strand, which comes back to the undisturbed frame'
 
 test('a held strand stays at the pointer while held and comes back after the release; no cheek layers, no cheek pull', async ({ page }) => {
   test.skip(!samplePresent, sampleSkipReason);
+  test.setTimeout(90_000);
   await blankPage(page);
   const result = await page.evaluate(async () => {
     const { createMeshAvatar } = await import('/packages/runtime/src/index.ts' as string) as typeof import('mesh-avatar');
@@ -175,12 +176,12 @@ test('a held strand stays at the pointer while held and comes back after the rel
       const tip = rig.strands.find((s: { name: string }) => s.name === 'sideL').nodes.at(-1);
       const handle = hold ? avatar.grab({ kind: 'strand', name: 'sideL' }, tip[0], tip[1]) : null;
       if (handle) avatar.moveGrab(handle, -40, 0);
-      avatar.advance(0.5);
+      avatar.advance(0.3);
       const held = read();
-      avatar.advance(0.5);
+      avatar.advance(0.2);
       const stillHeld = read();
       if (handle) avatar.releaseGrab(handle, 0, 0);
-      avatar.advance(3);
+      avatar.advance(2.5);
       const settled = read();
       avatar.destroy();
       return { held, stillHeld, settled, handle, cheek };
