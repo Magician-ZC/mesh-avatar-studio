@@ -111,7 +111,7 @@ the engine mapping. Do not copy the example illustration's coordinates into a ne
 | `strands[*].sigma` | Width of strand influence, px; around half the visible lock width. |
 | `strands[*].k` | Positive spring response multiplier, unitless; start near `1`. |
 | `strands[*].max` | Maximum hair displacement, px; start around 7–12. |
-| `strands[*].reach` | Optional positive distance, px: how far a held strand's tip may be pulled from where it hangs (`grab({ kind: 'strand' })`, WebGL runtime only). Without it the strand is not held and a drag flicks it as before; while held, `max` no longer bounds the strand, and after the release the strand springs back. Set it only as far as the drawing stays clean when the lock moves that far. |
+| `strands[*].reach` | Optional positive distance, px: how far a held strand's tip may be pulled from where it hangs (`grab({ kind: 'strand' })`, WebGL runtime only). Without it the strand is not held and a drag flicks it as before; while held, `max` no longer bounds the strand, and after the release the strand springs back. Set it only as far as the drawing stays clean when the lock moves that far: without strand layers (`build-layers.py --strand-layers`) a held strand bends the base, which stretches beyond about `max`; with them the lock moves on its own layer over the picture filled in behind it. |
 | `accessories[*].name` | Unique safe layer filename stem (letters/digits/underscore/hyphen), not a reserved layer name. |
 | `accessories[*].pivot` | Hanging accessory root `[x,y]`, px; fixed attachment point. |
 | `accessories[*].tip` | Hanging accessory endpoint `[x,y]`, px; bottom of pendant/tassel. |

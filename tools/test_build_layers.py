@@ -1332,5 +1332,84 @@ class CheekLayersTest(unittest.TestCase):
             self.assertEqual(int(head["skin"][y, x : x + 6, 3].max()), 255, y)
 
 
+class StrandLayersTest(unittest.TestCase):
+    """--strand-layers (tools/hair/strands.py): a held lock on its own layer over the base filled in behind it."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.project = Path(self.temporary.name)
+        self.rig = json.loads((ROOT / "samples/miko-qipao/rig.json").read_text())
+        self.rig["image"] = {"width": 120, "height": 160}
+        for key in ("hand", "buns", "accessories", "cloth"):
+            self.rig.pop(key, None)
+        self.rig["eyes"] = []
+        # skin over the lower part, a dark lock hanging over it from x 50..62 between y 40 and 150
+        image = Image.new("RGBA", (120, 160), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((10, 0, 110, 159), fill=(236, 200, 180, 255))
+        draw.rectangle((50, 40, 62, 150), fill=(40, 30, 28, 255))
+        for left in (20, 85):
+            self.rig["eyes"].append({"opening": [[left, 12], [left + 15, 12], [left + 15, 18], [left, 18]],
+                                     "roi": [[left - 4, 6], [left + 19, 6], [left + 19, 24], [left - 4, 24]]})
+            draw.rectangle((left, 12, left + 15, 18), fill=(255, 255, 255, 255))
+            draw.line((left, 11, left + 15, 11), fill=(15, 25, 50, 255), width=2)
+        image.save(self.project / "source.png")
+        hair = Image.new("L", (120, 160), 0)
+        ImageDraw.Draw(hair).rectangle((50, 40, 62, 150), fill=255)
+        hair.save(self.project / "hair.png")
+        self.rig["strands"] = [{"name": "lock", "nodes": [[56, 40], [56, 77], [56, 114], [56, 150]], "sigma": 6, "k": 1, "max": 8}]
+
+    def build(self, *options, reach=24):
+        rig = copy.deepcopy(self.rig)
+        if reach is not None:
+            rig["strands"][0]["reach"] = reach
+        (self.project / "rig.draft.json").write_text(json.dumps(rig))
+        return subprocess.run([sys.executable, str(SCRIPT), str(self.project), "--rig", "rig.draft.json",
+                               "--hairmask", str(self.project / "hair.png"), *options], capture_output=True, text=True, check=False)
+
+    def layer(self, meta, name):
+        x, y, w, h = meta["layers"][name]
+        full = np.zeros((160, 120, 4), np.uint8)
+        with Image.open(self.project / "built" / f"{name}.png") as image:
+            full[y : y + h, x : x + w] = np.array(image.convert("RGBA"))
+        return full, (x, y, w, h)
+
+    def test_lock_and_filled_plate_draw_the_base_at_rest(self):
+        result = self.build("--strand-layers")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        meta = json.loads((self.project / "built/layers.json").read_text())
+        self.assertEqual(meta["strands"]["lock"]["lock"], "strand_0")
+        self.assertEqual(meta["strands"]["lock"]["under"], "strand_0_under")
+        with Image.open(self.project / "built/base.png") as image:
+            base = np.array(image.convert("RGBA")).astype(np.float32)
+        lock, _ = self.layer(meta, "strand_0")
+        plate, (x, y, w, h) = self.layer(meta, "strand_0_under")
+        # the plate takes the place of the base in its rect, the lock goes over it: the base again
+        a = lock[..., 3:4].astype(np.float32) / 255
+        drawn = lock[..., :3] * a + plate[..., :3] * (1 - a)
+        window = (slice(y, y + h), slice(x, x + w))
+        self.assertLessEqual(np.abs(drawn[window] - base[window][..., :3]).max(), 1)
+        # the lock is the dark hair; under it the plate is skin, opaque
+        self.assertTrue((lock[60:140, 52:61, 3] == 255).all())
+        self.assertTrue((plate[60:140, 52:61, 3] == 255).all())
+        self.assertGreater(plate[60:140, 52:61, 0].min(), 200)
+        # the plate reaches as far round the strand as the base bends with it
+        self.assertLessEqual(x, 56 - 2 * 6)
+        self.assertGreaterEqual(x + w, 56 + 2 * 6)
+        self.assertGreaterEqual(meta["strands"]["lock"]["unsure"], 0)
+
+    def test_without_reach_or_option_nothing_changes(self):
+        self.assertEqual(self.build(reach=None).returncode, 0)
+        plain = json.loads((self.project / "built/layers.json").read_text())
+        self.assertEqual(self.build("--strand-layers", reach=None).returncode, 0)
+        meta = json.loads((self.project / "built/layers.json").read_text())
+        self.assertNotIn("strands", meta)
+        self.assertFalse(any(name.startswith("strand_") for name in meta["layers"]))
+        self.assertEqual(self.build().returncode, 0)  # a reach without the option: no layers either
+        self.assertNotIn("strands", json.loads((self.project / "built/layers.json").read_text()))
+        self.assertNotEqual(plain["build"], meta["build"])  # the option takes part in the build id
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -159,6 +159,13 @@ export function createRig(rig, headLayers = null) {
     return hits.map(([i, g, t]) => [i, hair * g / norm * sstep(0.04, 0.55, t), t]);
   }
 
+  // A held strand's own lock layer (strand layers) moves as one piece across the lock: its weight only rises from the root
+  // as the base's does, without the fall-off across the lock. [strand index, weight, t] like strandWeights.
+  function lockWeight(i, x, y) {
+    const [, t] = onPolyline(x, y, STRANDS[i].nodes);
+    return [i, sstep(0.04, 0.55, t), t];
+  }
+
   // Per-vertex weights of the base layer, computed once from the rest position.
   // hair: 0..1 from hairmask.png, so strands only move actual hair.
   function baseWeights(x, y, hair = 1) {
@@ -356,5 +363,5 @@ export function createRig(rig, headLayers = null) {
     const w = baseWeights(t.pivot[0], t.pivot[1]);
     return deformBase(t.pivot[0], t.pivot[1], w, P, phys, out);
   }
-  return { layered: !!FACE, legs: LEGS, stepBody: (P, dt) => LEGS?.step(P, dt), IMG, EYES, MOUTH, CHEEKS, STRANDS, TASSELS, headWeight, turnWeight, baseWeights, deformBase, applyHead, applyBody, handWeights, handFrame, deformHand, eyePartY, eyePartAlpha, tasselAnchor };
+  return { layered: !!FACE, legs: LEGS, stepBody: (P, dt) => LEGS?.step(P, dt), IMG, EYES, MOUTH, CHEEKS, STRANDS, TASSELS, headWeight, turnWeight, baseWeights, lockWeight, deformBase, applyHead, applyBody, handWeights, handFrame, deformHand, eyePartY, eyePartAlpha, tasselAnchor };
 }

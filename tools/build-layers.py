@@ -68,6 +68,7 @@ HEAD_LAYERS = Path(__file__).resolve().parent / "head" / "layers.py"
 HEAD_PLATE = Path(__file__).resolve().parent / "head" / "plate.py"
 IRIS_LAYERS = Path(__file__).resolve().parent / "eye" / "iris.py"
 CHEEK_PULL = Path(__file__).resolve().parent / "head" / "cheeks.py"
+STRAND_LAYERS = Path(__file__).resolve().parent / "hair" / "strands.py"
 _cheek_pull = None
 HEM_BAND = Path(__file__).resolve().parent / "cloth" / "hem.py"
 _hem_band = None
@@ -156,6 +157,19 @@ def head_layers():
             sys.dont_write_bytecode = previous
         _head_layers = module
     return _head_layers
+
+
+def strand_layers():
+    """tools/hair/strands.py, loaded from this folder without writing bytecode (only --strand-layers needs it)."""
+    spec = importlib.util.spec_from_file_location("mesh_avatar_strand_layers", STRAND_LAYERS)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
 
 
 def cheek_pull():
@@ -929,7 +943,7 @@ def read_plate(path, size):
 
 
 def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False, head=False, plate=None, footprint=None,
-          hem_legs=None, cheeks=False):
+          hem_legs=None, cheeks=False, strand_layers_on=False):
     source = project / "source.png"
     rig_bytes = rig_path.read_bytes()
     rig = json.loads(rig_bytes)
@@ -955,6 +969,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         options += b"head-plate:" + HEAD_LAYERS.read_bytes() + HEAD_PLATE.read_bytes() + Path(plate).read_bytes() + Path(footprint).read_bytes()
     if cheeks:
         options += b"cheek-pull:" + CHEEK_PULL.read_bytes()
+    if strand_layers_on:
+        options += b"strand-layers:" + STRAND_LAYERS.read_bytes()
     if rig.get("limbs"):  # only rigs with limbs depend on the limb cutter
         options += b"limbs:" + LIMB_LAYERS.read_bytes()
     if any(accessory.get("outline") is not None for accessory in rig.get("accessories", [])):
@@ -1169,6 +1185,15 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
                 for name, key in (("hair_front", "hair"), ("face_skin", "skin")):
                     store(name, *head_layers()._crop(head_full[key], head_full[key][..., 3]))
 
+    strand_notes = []
+    if strand_layers_on and any(s.get("reach") for s in rig.get("strands", [])):
+        drawn = images.get("base_bare", images.get("base_cloth", images["base"]))
+        cut, data, strand_notes = strand_layers().cut(drawn, external_hair if external_hair is not None else images["hairmask"], rig, smooth_fill)
+        for name, (image, rect) in cut.items():
+            store(name, image, rect)
+        if data:
+            meta["strands"] = data
+
     # Calculate everything before replacing files. Keep sprites and unrelated
     # assets intact; only filenames in this build's manifest are consumed.
     with tempfile.TemporaryDirectory(prefix=".build-layers-", dir=project) as temporary:
@@ -1193,6 +1218,8 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         print(f"build-layers: iris layers left out: {note}", file=sys.stderr)
     for note in cheek_notes:
         print(f"build-layers: cheek layers left out: {note}", file=sys.stderr)
+    for note in strand_notes:
+        print(f"build-layers: strand layers left out: {note}", file=sys.stderr)
     print(
         json.dumps({"build": build_id, "size": [w, h], "layers": list(meta["layers"])})
     )
@@ -1256,6 +1283,13 @@ def main():
         "which newer runtimes pull a cheek past the contour (a side is left out, with the reason on stderr, when its "
         "contour cannot be traced)",
     )
+    parser.add_argument(
+        "--strand-layers",
+        action="store_true",
+        help="also cut strand_<i>.png and strand_<i>_under.png for each strand with a reach: its lock, and the base round "
+        "it with the lock filled in, with which newer runtimes move a held lock without bending the base (a strand is "
+        "left out, with the reason on stderr, when its lock cannot be told)",
+    )
     args = parser.parse_args()
     if (args.head_plate is None) != (args.head_footprint is None):
         parser.error("--head-plate and --head-footprint go together")
@@ -1264,7 +1298,7 @@ def main():
     try:
         build(
             args.project_dir, args.project_dir / args.rig, args.hairmask, args.cloth_under, args.open_eyes, args.head_layers,
-            args.head_plate, args.head_footprint, args.hem_legs, args.cheek_pull,
+            args.head_plate, args.head_footprint, args.hem_legs, args.cheek_pull, args.strand_layers,
         )
     except (OSError, ValueError, KeyError, TypeError, cv2.error) as error:
         print(f"build-layers: {error}", file=sys.stderr)

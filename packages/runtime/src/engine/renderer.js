@@ -364,6 +364,8 @@ export function createRenderer(engine, rig) {
       if (opts.eyeIris !== undefined) faceMode = 8 + opts.eyeIris;
       if (opts.cheek !== undefined) faceMode = 10 + opts.cheek;
       const layer = { name, image: img, mesh, tex: this.texture(img), vao, posBuf, uvBuf, triBuf, lineBuf, visible: true, faceMode, color: opts.color || [1, 1, 1, 1] };
+      // replace: the layer's pixels take the place of what was drawn under it (transparent ones too), as a plate does
+      if (opts.replace) layer.replace = true;
       this.layers.push(layer);
       return layer;
     }
@@ -511,7 +513,9 @@ export function createRenderer(engine, rig) {
       gl.uniform4fv(m.u.uRect, L.mesh.rect);
       gl.uniform1i(m.u.uFace, L.faceMode);
       gl.uniform1f(m.u.uAlpha, alpha);
+      if (L.replace) gl.blendFunc(gl.ONE, gl.ZERO);
       gl.drawElements(gl.TRIANGLES, L.mesh.tris.length, gl.UNSIGNED_INT, 0);
+      if (L.replace) gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     }
 
     drawPoints(pts) {

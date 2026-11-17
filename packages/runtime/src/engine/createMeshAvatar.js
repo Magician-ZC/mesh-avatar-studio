@@ -75,6 +75,7 @@ function deformTassel(ch, mesh) {
 }
 
 // Optional head layers (built by tools/head/layers.py, see docs/format.md).
+const STILL_STRAND = [[0, 0], [0, 0], [0, 0], [0, 0]];
 const FACE_FIELD = 'face_field', HAIR_FRONT = 'hair_front', FACE_SKIN = 'face_skin';
 
 /** @param {HTMLCanvasElement} canvas
@@ -116,7 +117,7 @@ export async function createMeshAvatarImpl(canvas, options) {
     }
   }
   const engine = createRig(rig, head);
-  const { IMG, EYES, baseWeights, deformBase, eyePartY, eyePartAlpha,
+  const { IMG, EYES, baseWeights, lockWeight, deformBase, eyePartY, eyePartAlpha,
     handWeights, handFrame, deformHand, TASSELS } = engine;
   const { Renderer, buildGrid } = createRenderer(engine, rig);
   const { Physics } = createPhysics(engine, rig);
@@ -143,6 +144,19 @@ export async function createMeshAvatarImpl(canvas, options) {
   const names = [baseName, ...(bareName ? [bareName] : []), ...(rig.hand ? ['hand'] : []), ...TASSELS.map(t => t.name), ...CLOTH.map(c => `cloth_${c.name}`), ...LIMBS.map(l => `limb_${l.name}`), ...[0, 1].flatMap(i => eyePartNames(irisEyes[i]).map(p => `eye${i}_${p}`)), 'hairmask'];
   const imgs = Object.fromEntries(await Promise.all(names.map(async n => [n, await loadImage(asset(`${n}.png`, meta.build))])));
   if (CLOTH.length) imgs.base = imgs.base_cloth;
+  // strand layers (tools/hair/strands.py, layers.json "strands"): for a strand with a reach, its lock and the base filled
+  // in behind it; a strand whose layers are missing or do not load is held by bending the base, as without them
+  const strandLayers = (await Promise.all((rig.strands ?? []).map(async (s, index) => {
+    const entry = s.reach > 0 ? meta.strands?.[s.name] : null;
+    if (!entry || !meta.layers?.[entry.lock] || !meta.layers?.[entry.under]) return null;
+    try {
+      const [lock, under] = await Promise.all([entry.lock, entry.under].map(n => loadImage(asset(`${n}.png`, meta.build))));
+      return { index, entry, lock, under };
+    } catch (err) {
+      console.warn(`strand layers of ${s.name} not loaded:`, err);
+      return null;
+    }
+  }))).filter(Boolean);
   if (bareName) imgs.base = imgs[bareName];
   const hairMask = channelOf(imgs.hairmask, 0);
   const hairAt = (x, y) => hairMask[Math.min(IMG.h - 1, Math.max(0, Math.round(y))) * IMG.w + Math.min(IMG.w - 1, Math.max(0, Math.round(x)))] / 255;
@@ -181,6 +195,26 @@ export async function createMeshAvatarImpl(canvas, options) {
     baseW.push(baseWeights(x, y, hairAt(x, y)));
   }
   R.addLayer('base', imgs.base, baseMesh, { face: true });
+
+  // Strand layers, drawn only while their strand is held (or springs back after it): the plate takes the place of the
+  // base round the lock, still where the base bends with the strand, and the lock goes over it as one piece across its
+  // width. Both move with the head and body like the base; the plate also with the other strands.
+  const heldStrands = strandLayers.map(({ index, entry, lock, under }) => {
+    const plate = { mesh: buildGrid(rects[entry.under], rig.mesh.baseCell, new Uint8Array([255]), 1), W: [] };
+    const own = { mesh: buildGrid(rects[entry.lock], rig.mesh.fine?.cell ?? rig.mesh.baseCell, alphaOf(lock), lock.width), W: [] };
+    for (let k = 0; k < plate.mesh.rest.length / 2; k++) {
+      const x = plate.mesh.rest[k * 2], y = plate.mesh.rest[k * 2 + 1], w = baseWeights(x, y, hairAt(x, y));
+      plate.W.push({ ...w, strands: w.strands.filter(([i]) => i !== index) });
+    }
+    for (let k = 0; k < own.mesh.rest.length / 2; k++) {
+      const x = own.mesh.rest[k * 2], y = own.mesh.rest[k * 2 + 1];
+      own.W.push({ ...baseWeights(x, y, hairAt(x, y)), strands: [lockWeight(index, x, y)] });
+    }
+    plate.layer = R.addLayer(entry.under, under, plate.mesh, { replace: true });
+    own.layer = R.addLayer(entry.lock, lock, own.mesh);
+    plate.layer.visible = own.layer.visible = false;
+    return { index, items: [plate, own] };
+  });
 
   // head layers: the skin under the hair moves with the face and hides the base's own copy of that hair
   const headCell = rig.mesh.fine?.cell ?? rig.mesh.baseCell;
@@ -365,8 +399,11 @@ export async function createMeshAvatarImpl(canvas, options) {
     lastP = P; lastPhys = phys;
 
     const bp = baseMesh.pos, br = baseMesh.rest;
+    // a held strand drawn on its own layers does not bend the base: its plate covers the base there
+    const layered = heldStrands.length ? heldStrands.filter(s => physics.held[s.index] > 0).map(s => s.index) : [];
+    const basePhys = layered.length ? { ...phys, strands: phys.strands.map((o, i) => layered.includes(i) ? STILL_STRAND : o) } : phys;
     for (let i = 0; i < baseW.length; i++) {
-      deformBase(br[i * 2], br[i * 2 + 1], baseW[i], P, phys, tmp);
+      deformBase(br[i * 2], br[i * 2 + 1], baseW[i], P, basePhys, tmp);
       bp[i * 2] = tmp[0]; bp[i * 2 + 1] = tmp[1];
     }
     // with drawn eye sprites the layered eye is only ever shown exactly as drawn: moving the
@@ -408,6 +445,18 @@ export async function createMeshAvatarImpl(canvas, options) {
     // An iris eye's open-eye layer has its hole right at the lids. While it is fully shown the line layers under it
     // are not drawn: under its edge, however the textures are filtered, only the eye itself may lie.
     for (const ep of eyeParts) if (irisEyes[ep.eye] && !isEyeFill(ep.part) && openShown[ep.eye] >= 0.999) ep.layer.alpha = 0;
+    for (const { index, items } of heldStrands) {
+      const shown = physics.held[index] > 0;
+      for (const item of items) {
+        item.layer.visible = shown;
+        if (!shown) continue;
+        const r = item.mesh.rest, o = item.mesh.pos;
+        for (let k = 0; k < item.W.length; k++) {
+          deformBase(r[k * 2], r[k * 2 + 1], item.W[k], P, phys, tmp);
+          o[k * 2] = tmp[0]; o[k * 2 + 1] = tmp[1];
+        }
+      }
+    }
     for (const item of [faceSkin, hairFront]) {
       if (!item) continue;
       const r = item.mesh.rest, o = item.mesh.pos;
