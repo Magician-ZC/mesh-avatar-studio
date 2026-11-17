@@ -609,6 +609,33 @@ class HeadLayersTest(unittest.TestCase):
         meta = json.loads((self.project / "built/layers.json").read_text())
         self.assertLess(meta["head"]["restMean"], 1.0)
 
+    def test_an_eyelid_band_the_plate_draws_a_pixel_off_is_no_hair(self):
+        # the fringe reaches down over the right eye's lid, where the source shows the lid's darker band under it and the
+        # footprint takes that band for hair; the plate draws the same band two pixels lower
+        lid = (150, 100, 90, 255)
+        with Image.open(self.project / "source.png") as image:
+            source = image.convert("RGBA")
+        draw = ImageDraw.Draw(source)
+        draw.rectangle((200, 166, 260, 168), fill=self.HAIR)
+        draw.rectangle((200, 169, 260, 170), fill=lid)
+        source.save(self.project / "source.png")
+        with Image.open(self.footprint_path) as image:
+            footprint = image.convert("L")
+        ImageDraw.Draw(footprint).rectangle((200, 166, 260, 170), fill=255)
+        footprint.save(self.footprint_path)
+        plate = self.plate.copy()
+        ImageDraw.Draw(plate).rectangle((200, 171, 260, 172), fill=lid)
+        plate.save(self.plate_path)
+        result = self.run_cli("--open-eyes", "--head-plate", str(self.plate_path), "--head-footprint", str(self.footprint_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("left out", result.stderr)
+        hair = self.layer("hair_front")
+        for x in (215, 230, 245):
+            self.assertEqual(int(hair[167, x, 3]), 255, x)  # the fringe is hair down to its edge
+            self.assertEqual((int(hair[169, x, 3]), int(hair[170, x, 3])), (0, 0), x)  # the band is the face's
+        meta = json.loads((self.project / "built/layers.json").read_text())
+        self.assertLess(meta["head"]["restMean"], 1.0)
+
     def test_a_plate_that_is_no_plate_leaves_the_head_layers_out_and_says_why(self):
         # the "plate" still has the hair: nothing can be lifted
         with Image.open(self.project / "source.png") as image:

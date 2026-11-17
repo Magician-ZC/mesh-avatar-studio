@@ -32,6 +32,10 @@ KEEP = 8  # 8-bit levels: where nothing is lifted, the plate may stand in for th
 EDGE = 16  # 8-bit levels: a soft hair pixel whose hair over the layer below is further from the source is left to the source
 LIFT = 0.1  # a pixel the plate would hide is hair if its source lies at least this far from the plate towards the hair colour
 PLAUSIBLE = 90  # RGB distance from the local hair colour within which a hair pixel's colour is one hair can have
+EXPLAIN = 2  # px: by the eyes, a pixel the plate shows this close by is the plate drawn a little off, not hair
+ISLAND = 8  # px around an eye's zone from which hair there must hang down (or be no hair)
+RIM = 4  # px: how far into the hair by an eye the plate may explain a pixel
+BESIDE = 1.5  # px (blur sigma): the solid hair whose colour a soft hair pixel by the eyes takes
 
 
 def _blur(image, sigma):
@@ -79,13 +83,37 @@ def backdrop(plate_rgb, valid):
     return np.isin(labels, keep)
 
 
-def matte(source_rgb, plate_rgb, footprint, valid, features=None):
+def explained(src, plate, where, hair, radius=EXPLAIN):
+    """The pixels of `where` whose source colour the plate has within `radius` px (closer than SAME): the plate's own
+    drawing a little off, not hair. Only plate pixels unlike the local hair colour `hair` explain anything (a dark lash
+    line explains no dark lock lying across it). src, plate and hair are float RGB."""
+    found = np.zeros(where.shape, bool)
+    ys, xs = np.nonzero(where)
+    if len(xs) == 0:
+        return found
+    h, w = where.shape
+    y0, y1, x0, x1 = max(0, ys.min() - radius), min(h, ys.max() + radius + 1), max(0, xs.min() - radius), min(w, xs.max() + radius + 1)
+    box, near_hair = src[y0:y1, x0:x1], hair[y0:y1, x0:x1]
+    padded = cv2.copyMakeBorder(plate[y0:y1, x0:x1], radius, radius, radius, radius, cv2.BORDER_REPLICATE)
+    nearest = np.full(box.shape[:2], np.inf, np.float32)
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dx * dx + dy * dy <= radius * radius:
+                moved = padded[radius + dy : radius + dy + box.shape[0], radius + dx : radius + dx + box.shape[1]]
+                distance = np.linalg.norm(box - moved, axis=-1)
+                distance[np.linalg.norm(moved - near_hair, axis=-1) <= MIN_CONTRAST] = np.inf
+                nearest = np.minimum(nearest, distance)
+    found[y0:y1, x0:x1] = where[y0:y1, x0:x1] & (nearest < SAME)
+    return found
+
+
+def matte(source_rgb, plate_rgb, footprint, valid, features=None, eyes=None):
     """Hair alpha (0..1) of the source over the plate inside the grown footprint, and the hair's local colour.
 
     footprint: where the plate's maker says the hair is (0..1). valid: where the plate is defined.
     features: the eye regions and the brow, where only hair on the footprint itself counts (grown by two pixels) -
     lashes and brows are as dark as hair, and a plate that draws them a pixel off would otherwise leave slivers of them
-    on the hair layer, which stay behind when the face turns.
+    on the hair layer, which stay behind when the face turns. eyes: the part of features around the eyes (default all).
     Returns (alpha, hair colour, reason): alpha is None with the reason when the plate does not allow it.
     """
     src = source_rgb.astype(np.float32)
@@ -119,9 +147,22 @@ def matte(source_rgb, plate_rgb, footprint, valid, features=None):
     alpha[alpha > SOLID] = 1
     if features is not None:
         alpha[features & ~(cv2.dilate((footprint > 0.3).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0)] = 0
-    # specks: only what hangs together with solid hair
+        eyes = features if eyes is None else eyes
+        # nor, at the hair's edge by an eye, a pixel the plate shows a pixel or two away: the plate drew the eyelid's band
+        # or the lash line a little off, and lifted, that band would stay on the hair layer when the eye closes or the
+        # face turns (the hair's own soft rim is left alone)
+        rim = eyes & (alpha >= 0.5) & (cv2.dilate((alpha <= 0).astype(np.uint8), np.ones((2 * RIM + 1, 2 * RIM + 1), np.uint8)) > 0)
+        alpha[explained(src, plate, rim, hair)] = 0
+        # and what is left of that band ends in a clean edge: no single pixels sticking out of the hair
+        thin = (alpha > 0) & ~(cv2.morphologyEx((alpha > 0).astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0)
+        alpha[thin & rim] = 0
+    # specks: only what hangs together with solid hair - by the eyes, with solid hair beyond them (what is left of the
+    # eyelid's band once the plate has explained the rest is no hair hanging over the eye)
     _, labels = cv2.connectedComponents((alpha > 0).astype(np.uint8))
-    kept = np.unique(labels[alpha >= 1])
+    anchor = alpha >= 1
+    if features is not None:
+        anchor &= ~(cv2.dilate(eyes.astype(np.uint8), np.ones((2 * ISLAND + 1, 2 * ISLAND + 1), np.uint8)) > 0)
+    kept = np.unique(labels[anchor])
     alpha[~np.isin(labels, kept[kept != 0])] = 0
     return alpha.astype(np.float32), hair, None
 
@@ -196,6 +237,20 @@ def lift(source, plate_rgb, alpha, hair_colour, moving, valid, features=None):
         if features is not None:
             refit = np.where(features, np.minimum(refit, a), refit)
         a = np.where(swapped, refit, a)
+    # by the eyes the hair's soft edge takes the colour of the solid hair beside it, its alpha solved again against that
+    # colour (never more than before): solved exactly, the edge carries what lies under it - a light rim over the dark
+    # lash line - which shows once the eye closes or the face turns; and no eye colour goes onto the hair layer
+    edge = near_eyes & (a > 0) & (a < 0.999)
+    if np.any(edge):
+        local, amount = _local_colour(src, (a >= 0.999) & (alpha > 0), BESIDE)
+        local = np.where((amount > 0.01)[..., None], local, hair_colour)
+        towards = local - under_drawn
+        refit = np.minimum(np.clip(np.sum((src - under_drawn) * towards, axis=-1) / np.maximum(np.sum(towards * towards, axis=-1), 1.0), 0, 1), a)
+        # where that hair colour cannot give the source back, the pixel keeps its colour
+        fits = np.abs(under_drawn * (1 - refit[..., None]) + local * refit[..., None] - src).max(-1) <= EDGE
+        edge &= fits
+        colour = np.where(edge[..., None], local, colour)
+        a = np.where(edge, refit, a)
     # by the eyes, a soft pixel that no hair colour and alpha give back (a highlight lighter than both sides, another hue)
     # is left to the source: no hair there, the source below - a speck that moves with the face rather than a wrong
     # colour in the resting picture next to the eye
@@ -256,16 +311,17 @@ def cut(source, rig, plate_rgba, footprint, frame_of, field_of, moving_floor, ou
     plate_rgb, shift, response = align(np.ascontiguousarray(source[..., :3]), plate_rgb, low & valid)
     if max(abs(shift[0]), abs(shift[1])) > ALIGN_LIMIT:
         return None, f"the plate lies {max(abs(shift[0]), abs(shift[1])):.1f} px off the picture"
-    features = np.zeros(shape, bool)
+    eyes = np.zeros(shape, bool)
     for eye in rig["eyes"]:
         region = np.zeros(shape, np.uint8)
         cv2.fillPoly(region, [np.array(eye["roi"], np.int32)], 1)
-        features |= cv2.dilate(region, np.ones((9, 9), np.uint8)) > 0
+        eyes |= cv2.dilate(region, np.ones((9, 9), np.uint8)) > 0
+    features = eyes.copy()
     brow = rig["face"].get("brow")
     if brow:
         yy, xx = np.mgrid[: shape[0], : shape[1]]
         features |= ((xx - brow["cx"]) / (brow["rx"] + 8)) ** 2 + ((yy - brow["cy"]) / (brow["ry"] + 8)) ** 2 <= 1
-    alpha, hair_colour, reason = matte(np.ascontiguousarray(source[..., :3]), plate_rgb, footprint.astype(np.float32) / 255, valid, features)
+    alpha, hair_colour, reason = matte(np.ascontiguousarray(source[..., :3]), plate_rgb, footprint.astype(np.float32) / 255, valid, features, eyes)
     if alpha is None:
         return None, reason
     hair, under, weight = lift(source, plate_rgb, alpha, hair_colour, moving, valid, features)
