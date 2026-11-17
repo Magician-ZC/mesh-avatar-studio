@@ -51,6 +51,9 @@ HIDDEN = 4  # px: a row whose seen face ends this far inside the contour has hai
 COVER_EASE = 0.05  # in L: the pull stays off this far beside hair over the contour and eases in over twice that
 LINE = 6  # px either side of the contour in which hair_front pixels can be the contour's own drawn line
 LINE_HAIR = 16  # hair_front within this many px (through hair_front) of hair beyond the band stays hair
+OUTER = 10  # px outside the contour to which that band reaches
+THICK = 5  # px: in the band, hair_front narrower than this is the contour's line, through which no hair reaches in
+BESIDE = (4, 17)  # px outside the contour (from, to) where hair in front of the face lies beside it, past its own line
 SMOOTH = 0.03  # in L: the traced contour is smoothed over this many rows (a pulled contour must turn smoothly)
 
 
@@ -131,6 +134,20 @@ def _trace(lab, stop, skin_distance, row, start, step, reach):
         else:
             run = 0
     return edge, front
+
+
+def _runs_with(mask, seeds):
+    """The runs of consecutive True in `mask` (1D) that contain a True of `seeds`."""
+    out = np.zeros(len(mask), bool)
+    start = None
+    for k in range(len(mask) + 1):
+        if k < len(mask) and mask[k]:
+            start = k if start is None else start
+        elif start is not None:
+            if seeds[start:k].any():
+                out[start:k] = True
+            start = None
+    return out
 
 
 def _contour(v, e, D, sigma):
@@ -282,6 +299,7 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
         # rows that end well inside the contour because hair lies over it (not a shadow or a line on the cheek)
         inward = np.array([inward[k] and math.isfinite(edges[k]) and at_hair(rect_hair, row, edges[k]) for k, row in enumerate(rows)])
         hidden, seen_edges = np.zeros(len(rows), bool), np.full(len(rows), np.inf)
+        beside = np.zeros(len(rows), bool)
         if layered:
             seen_distance = np.linalg.norm(seen_lab - skin, axis=-1)
             for k, row in enumerate(rows):
@@ -289,9 +307,19 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
                 hidden[k] = math.isfinite(edge) and abs(edge - half) < smooth[k] - HIDDEN and at_hair(seen_front, row, abs(edge - half))
                 if hidden[k]:
                     seen_edges[k] = abs(edge - half)
+            # hair in front of the face that hides the contour and goes on right beside it (an ear the plate took for hair,
+            # cut where the hair layer ends): pulled there the contour only slides under that hair, and where the hair
+            # ends the pulled cheek comes out from under it in a step. Such rows count as hidden too
+            beside = np.array([any(0 <= int(round(half + sign * (smooth[k] + j))) < seen_front.shape[1]
+                                   and seen_front[row, int(round(half + sign * (smooth[k] + j)))] >= 128 for j in range(*BESIDE))
+                               for k, row in enumerate(rows)])
+            beside = _runs_with(hidden | beside, hidden) & ~hidden
+            # and the pull eases in only past the end of that hair
+            ease = 2 * int(COVER_EASE * L) + 1
+            beside = cv2.dilate(beside.astype(np.uint8)[:, None], np.ones((ease, 1), np.uint8))[:, 0] > 0
         # without head layers, hair that ends a row with skin beyond it lies over the cheek; with them that hair is lifted,
         # and only hair over the contour itself (rows ending well inside it) is left to be dragged along
-        traced[side] = (sign, smooth, (fronts if head is None else np.zeros_like(fronts)) | inward, skin, hidden | inward, seen_edges)
+        traced[side] = (sign, smooth, (fronts if head is None else np.zeros_like(fronts)) | inward, skin, hidden | inward | beside, seen_edges)
         widths[side] = smooth
     if not traced:
         return {}, {}, notes, head
@@ -310,16 +338,21 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
     layers, data = {}, {}
     if layered:
         # the contour's drawn line in hair_front moves to face_skin: hair_front pixels near the contour that are not
-        # part of hair reaching out of that band (hair crossing the contour stays in front)
-        band, line = np.zeros((h, w), np.uint8), np.zeros((h, w), np.uint8)
+        # part of hair reaching out of that band (hair crossing the contour stays in front). The band reaches further
+        # out than in (OUTER px): the line is drawn outside the skin's edge, and can lie a few px off the traced one
+        band = np.zeros((h, w), np.uint8)
         for sign, smooth, *_ in traced.values():
             pts = np.rint(np.array([_point(f, sign * x, y) for x, y in zip(smooth, rows)])).astype(np.int32)
             cv2.polylines(band, [pts], False, 255, 2 * LINE + 1)
-            cv2.polylines(line, [pts], False, 255, 1)
+            out = np.rint(np.array([_point(f, sign * (x + (LINE + OUTER) / 2), y) for x, y in zip(smooth, rows)])).astype(np.int32)
+            cv2.polylines(band, [out], False, 255, OUTER - LINE + 1)
         alpha = head["hair"][..., 3]
-        distance = cv2.distanceTransform(255 - line, cv2.DIST_L2, 5)
-        reached = ((alpha > 64) & (distance > LINE + 3)).astype(np.uint8)
+        reached = ((alpha > 64) & ~(cv2.dilate(band, np.ones((7, 7), np.uint8)) > 0)).astype(np.uint8)
         within = (alpha > 12).astype(np.uint8)
+        # but not along the contour's own line: a thin run of hair_front in the band (the line itself, which can touch
+        # real hair at its ends) carries nothing from beyond the band into it
+        thick = cv2.morphologyEx(within, cv2.MORPH_OPEN, np.ones((THICK, THICK), np.uint8))
+        within[(band > 0) & (thick == 0)] = 0
         for _ in range(LINE_HAIR):
             reached = cv2.dilate(reached, np.ones((3, 3), np.uint8)) & within
         moved = (band > 0) & (alpha > 0) & (reached == 0)

@@ -1256,6 +1256,29 @@ class CheekLayersTest(unittest.TestCase):
             self.assertEqual(int(hair[y, int(round(x0)) - 1 : int(round(x0)) + 2, 3].max()), 0)
             self.assertEqual(int(hair[y, int(round(x1)) - 1 : int(round(x1)) + 2, 3].max()), 0)
 
+    def test_the_contour_line_moves_to_the_skin_also_where_it_touches_a_lock(self):
+        # hair_front has the right contour's drawn line (2 px, a little outside the skin's edge) and a lock crossing the
+        # contour at its top: the lock stays in front, the line below it does not, all the way to where it touches
+        cheeks = builder.cheek_pull()
+        w, h = self.SIZE
+        with Image.open(self.project / "source.png") as image:
+            drawn = np.array(image.convert("RGBA"))
+        with Image.open(self.hairmask_path) as image:
+            hairmask = np.array(image.convert("L"))
+        hair_front = np.zeros((h, w, 4), np.uint8)
+        for y in range(200, 300):
+            x = self.contour(y)[1]
+            hair_front[y, int(round(x)) + 2 : int(round(x)) + 4] = (120, 70, 60, 255)
+        hair_front[216:225, int(round(self.contour(220)[1])) - 12 : 345] = self.HAIR
+        head = {"hair": hair_front, "skin": np.zeros((h, w, 4), np.uint8)}
+        layers, data, notes, head = cheeks.cut(drawn, hairmask, self.rig, np.zeros((h, w), bool), builder.polygon_mask, head)
+        self.assertIn("right", data, notes)
+        self.assertEqual(int(head["hair"][220, 330, 3]), 255)  # the lock
+        for y in (228, 234, 260):
+            x = int(round(self.contour(y)[1]))
+            self.assertEqual(int(head["hair"][y, x : x + 6, 3].max()), 0, y)  # the line is the skin's
+            self.assertEqual(int(head["skin"][y, x : x + 6, 3].max()), 255, y)
+
 
 if __name__ == "__main__":
     unittest.main()
