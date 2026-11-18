@@ -1,6 +1,6 @@
 // The painted thigh stays on the leg. Only the yarn lifted between the finger and its
 // contact line leaves that surface, so the knee shading never travels into the fold.
-const COLUMNS = 20, ROWS = 8;
+const COLUMNS = 20, ROWS = 10;
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 
 function stockingSample(image, rect) {
@@ -103,6 +103,8 @@ export function createStockingFold(renderer, name, image, rect, fittedLayer) {
   const sample = stockingSample(image, rect), mesh = foldMesh(rect);
   const texture = document.createElement('canvas');
   texture.width = texture.height = 96;
+  // Lighting may build its normal map before the first grab supplies the local dye.
+  paintFibres(texture, [96, 96, 96], () => 0);
   const layer = renderer.addLayer(`fold_${name}`, texture, mesh);
   const tension = fittedLayer.stockingTension = new Float32Array(8);
   layer.visible = false;
@@ -147,10 +149,11 @@ export function createStockingFold(renderer, name, image, rect, fittedLayer) {
       const axial = rx * ax + ry * ay, lateral = rx * nx + ry * ny;
       for (let row = 0; row <= ROWS; row++) {
         const t = row / ROWS, remaining = 1 - t, bow = Math.sin(Math.PI * t);
-        const spread = lateral * remaining * (1 + .18 * bow) + sa * .08 * width * t;
+        const cap = Math.sqrt(1 - Math.max(0, (t - .80) / .20) ** 2);
+        const spread = lateral * remaining * (1 + .18 * bow) + sa * .08 * width * t * cap;
         // The pinch has a rounded crown. Gravity bows the two walls between their
         // stationary contact ring and the fingers; both walls transmit the background.
-        const forward = axial * remaining + .065 * width * ca * t;
+        const forward = axial * remaining + .065 * width * ca * t * cap;
         const px = tipX + ax * forward + nx * spread, py = tipY + ay * forward + ny * spread + .07 * width * bow;
         const i = 2 * (row * (COLUMNS + 1) + col);
         // Off-leg yarn follows the local material frame even if it crosses the other leg.
