@@ -33,7 +33,8 @@ written). The open-eye layer of such an eye has a hole as large as everything th
 iris stays in it. When the picture does not allow it the reason is printed and that eye is cut as before.
 
 A rig with `limbs` (generic limb chains) also gets limb_<name>.png for every limb and base_bare.png, the base without
-them, named by "bare" in layers.json (see tools/limbs/layers.py); base.png keeps the limbs for older runtimes.
+them, named by "bare" in layers.json (see tools/limbs/layers.py); base.png keeps the limbs for older runtimes. Under a
+limb, base_bare goes on with the garment's own texture beside it (tools/cloth/behind.py).
 """
 
 import argparse
@@ -96,7 +97,8 @@ def hem_band():
 
 
 def behind_fill():
-    """tools/cloth/behind.py, loaded from this folder without writing bytecode (only accessories cut by an outline need it)."""
+    """tools/cloth/behind.py, loaded from this folder without writing bytecode (only accessories cut by an outline
+    and limbs need it)."""
     global _behind
     if _behind is None:
         spec = importlib.util.spec_from_file_location("mesh_avatar_behind", BEHIND)
@@ -972,7 +974,7 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
     if strand_layers_on:
         options += b"strand-layers:" + STRAND_LAYERS.read_bytes()
     if rig.get("limbs"):  # only rigs with limbs depend on the limb cutter
-        options += b"limbs:" + LIMB_LAYERS.read_bytes()
+        options += b"limbs:" + LIMB_LAYERS.read_bytes() + b"behind:" + BEHIND.read_bytes()  # the body under them
     if any(accessory.get("outline") is not None for accessory in rig.get("accessories", [])):
         options += b"behind:" + BEHIND.read_bytes()  # what lies behind an accessory cut by an outline
     if any(eye.get("iris") is not None for eye in rig["eyes"]):  # only eyes with an iris depend on the iris cutter
@@ -1127,7 +1129,7 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
     limbs = np.zeros((h, w), np.uint8)
     if rig.get("limbs"):
         # the runtime base is base_cloth with garments, base otherwise; base_bare is that without the limbs
-        images["base_bare"] = limb_layers().cut(rgba, images.get("base_cloth", images["base"]), rig, store)
+        images["base_bare"] = limb_layers().cut(rgba, images.get("base_cloth", images["base"]), rig, store, behind_fill().fill)
         meta["bare"] = "base_bare"
         for mask in limb_layers().masks(rgba, rig):
             limbs[mask] = 255

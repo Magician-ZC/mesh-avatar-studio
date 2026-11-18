@@ -231,6 +231,35 @@ class BuildLayersTest(unittest.TestCase):
         rig = json.loads((self.project / "rig.json").read_text())
         self.assertEqual(rig["limbs"][0]["name"], "leg_left")
 
+    def test_under_a_limb_the_garment_goes_on_with_its_own_texture(self):
+        # an arm hanging in front of a striped jacket: the bare base under it continues the stripes, not a smooth blend
+        image = Image.new("RGBA", (100, 80), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        stripes = [(200, 60, 60, 255), (60, 60, 200, 255)]
+        for x in range(5, 96):
+            draw.line((x, 10, x, 79), fill=stripes[x // 4 % 2])
+        for left in (15, 65):  # the eyes
+            draw.rectangle((left, 28, left + 15, 36), fill=(255, 255, 255, 255))
+            draw.line((left, 27, left + 15, 27), fill=(15, 25, 50, 255), width=2)
+        draw.rectangle((40, 30, 56, 78), fill=(230, 200, 160, 255))  # the arm, over the jacket and below it
+        image.save(self.project / "source.png")
+        self.rig["limbs"] = [{
+            "name": "arm_left", "kind": "arm", "joints": [[48, 32], [48, 55], [48, 77]],
+            "outline": [[39, 29], [57, 29], [57, 79], [39, 79]],
+        }]
+        self.draft.write_text(json.dumps(self.rig))
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with Image.open(self.project / "built/base_bare.png") as image:
+            bare = np.array(image.convert("RGBA")).astype(int)
+        under = bare[40:72, 42:55]
+        self.assertTrue((under[..., 3] == 255).all())
+        near = [np.abs(under[..., :3] - colour[:3]).max(axis=-1) <= 40 for colour in stripes]
+        # each pixel is one stripe or the other (a blend of the two is neither), and both go on under the arm
+        self.assertGreater((near[0] | near[1]).mean(), 0.8)
+        self.assertGreater(near[0].mean(), 0.2)
+        self.assertGreater(near[1].mean(), 0.2)
+
     def test_limb_input_checks(self):
         self.add_limb()
         (self.project / "built").mkdir(exist_ok=True)

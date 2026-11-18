@@ -324,8 +324,10 @@ cut-out cloth must be corrected in the artwork rather than by increasing motion.
 Experimental feature for poses that the hanging `arms` and planted `legs` do not cover (sitting, kneeling, squatting,
 a raised hand); WebGL runtime only. Omit `limbs` to retain the existing output exactly. Each entry is a two-bone chain cut
 into its own layer `limb_<name>`; the layer builder also writes `base_bare.png`, the base without the limbs (named by
-`bare` in `layers.json`), and `base.png` keeps them for older runtimes. A standing figure keeps using `arms` and `legs`;
-the same limb must not be bound in both places.
+`bare` in `layers.json`), and `base.png` keeps them for older runtimes. Under a limb, `base_bare.png` goes on with the
+texture of the garment beside it (its folds and seams copied from round the limb; of a plain garment only its own colour,
+so a strap or buttons beside the arm are not copied), as far as the limb can move. A standing figure keeps using `arms`
+and `legs`; the same limb must not be bound in both places.
 
 | Field | Meaning |
 | --- | --- |

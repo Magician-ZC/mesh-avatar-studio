@@ -6,8 +6,10 @@ avatar - base_bare under the limb layers - shows the source unchanged. Under eac
 visible pixels next to it, within a band as wide as the limb can move at its limits: a covered pixel is body where the
 visible body lies on both sides of the limb along its row or its column (body edges run straight on under the limb) or
 where the nearest visible pixel is body; elsewhere, and behind the limb's antialiased silhouette, it is background.
-Body colours are filled in from the neighbouring visible colours with OpenCV Telea. base.png keeps the limbs, so
-runtimes that do not know rig.limbs still draw them.
+Body colours are filled in from the neighbouring visible colours with OpenCV Telea; given a texture fill (build-layers.py
+passes tools/cloth/behind.py), the body under a limb goes on with the garment's own texture instead - its folds, seams
+and print copied from the visible body round the limb - so a held arm swung out uncovers the jacket, not a flat patch.
+base.png keeps the limbs, so runtimes that do not know rig.limbs still draw them.
 
 Loaded by build-layers.py from its own folder only when the rig has limbs.
 """
@@ -23,6 +25,10 @@ SWING = (4.0, 10.0)  # default and largest swing limit, degrees (runtime: packag
 BEND = (6.0, 12.0)
 BAND_MARGIN = 6  # px beyond the farthest an edge can move
 SOLID = 250  # source alpha from which a pixel counts as part of the body, not of an antialiased silhouette
+RING_WIDTH = 16  # px: the ring round a limb whose colour is the garment beside it
+BESIDE_TINT = 10.0  # CIE a*b* distance from that colour within which a pixel is the garment, not a strap or skin
+DOMINANT = 0.6  # share of the ring within it that makes the garment one colour
+PATCH = 22  # px: the side of a patch the texture is copied in (tools/cloth/behind.py)
 
 
 def _points(value, path, minimum, w, h):
@@ -91,10 +97,10 @@ def crop(layer, mask, pad=2):
     return layer[y0:y1, x0:x1].copy(), [x0, y0, x1 - x0, y1 - y0]
 
 
-def opaque_colours(rgba):
-    """The RGB of `rgba` with every not-opaque pixel taking the colour of the nearest opaque one, so that inpainting
-    never pulls in the meaningless colour of transparent pixels."""
-    solid = rgba[..., 3] >= 128
+def opaque_colours(rgba, solid=None):
+    """The RGB of `rgba` with every not-opaque pixel (or every pixel outside `solid`) taking the colour of the nearest
+    opaque one, so that inpainting never pulls in the meaningless colour of transparent pixels."""
+    solid = rgba[..., 3] >= 128 if solid is None else solid
     if not solid.any() or solid.all():
         return np.ascontiguousarray(rgba[..., :3])
     _, labels = cv2.distanceTransformWithLabels((~solid).astype(np.uint8), cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL)
@@ -118,10 +124,36 @@ def enclosed(hole, visible):
     return result
 
 
-def cut(rgba, base, rig, store):
-    """Store limb_<name> for every limb; return base_bare (the runtime base without the limbs)."""
+def garment_beside(rgba, mask, visible):
+    """The visible pixels of the garment beside a limb that its texture may be copied from. When the body round the limb
+    (a RING_WIDTH ring) is mostly of one colour (DOMINANT of it within BESIDE_TINT of its median CIE a*b*) and that colour
+    holds whole patches (PATCH), only pixels of that colour: a strap, buttons, a zipper or skin lying beside a plain
+    jacket's sleeve are not copied under it. A print of several colours (stripes, flowers) keeps them all."""
+    ring = cv2.dilate(mask.astype(np.uint8), np.ones((2 * RING_WIDTH + 1,) * 2, np.uint8)) > 0
+    ring &= visible & ~mask
+    if ring.sum() < 16:
+        return visible
+    lab = cv2.cvtColor(np.ascontiguousarray(rgba[..., :3]), cv2.COLOR_RGB2LAB).astype(np.float32)
+    tint = np.median(lab[ring][:, 1:], axis=0)
+    plain = np.hypot(lab[..., 1] - tint[0], lab[..., 2] - tint[1]) <= BESIDE_TINT
+    if plain[ring].mean() < DOMINANT:
+        return visible
+    plain &= visible
+    whole = cv2.erode(plain.astype(np.uint8), np.ones((PATCH, PATCH), np.uint8), borderType=cv2.BORDER_CONSTANT,
+                      borderValue=0)
+    return plain if whole.any() else visible
+
+
+def cut(rgba, base, rig, store, texture=None):
+    """Store limb_<name> for every limb; return base_bare (the runtime base without the limbs). `texture`: a fill
+    `texture(rgba, hole, source)` returning RGBA with the hole filled from the `source` pixels (tools/cloth/behind.py),
+    used for the body under each limb; without it the body is filled smoothly (Telea)."""
     bare = base.copy()
-    for limb, mask in zip(rig.get("limbs", []), masks(rgba, rig), strict=True):
+    limb_masks = masks(rgba, rig)
+    anywhere = np.zeros(rgba.shape[:2], bool)
+    for mask in limb_masks:
+        anywhere |= mask
+    for limb, mask in zip(rig.get("limbs", []), limb_masks, strict=True):
         layer = rgba.copy()
         layer[..., 3] = np.where(mask, rgba[..., 3], 0).astype(np.uint8)
         store(f"limb_{limb['name']}", *crop(layer, mask))
@@ -138,5 +170,16 @@ def cut(rgba, base, rig, store):
         body = enclosed(mask, visible) | (visible[ys[nearest], xs[nearest]] & mask)
         solid = body & (inside <= reach(limb)) & (rgba[..., 3] >= SOLID)
         bare[mask, :3] = rgb[mask]
+        if texture is not None and solid.any():
+            # the garment beside the limb goes on under it: patches of the visible body round it (no limb, no
+            # background), the whole limb unknown so that nothing of it is copied (where no patch reaches, the smooth
+            # colours stay)
+            source = garment_beside(bare, mask, (bare[..., 3] == 255) & ~anywhere)
+            if source.any():
+                # the limb's pixels the fill keeps as they are (where it hung over the background) are the garment's
+                # nearest colours: what is copied next to them matches the garment, not the smooth fill's blend
+                beside = np.dstack([opaque_colours(bare, source), bare[..., 3]])
+                filled = texture(np.where(mask[..., None], beside, bare).astype(np.uint8), mask, source)
+                bare[solid, :3] = filled[solid, :3]
         bare[mask, 3] = np.where(solid[mask], 255, 0).astype(np.uint8)
     return bare
