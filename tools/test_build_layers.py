@@ -1331,6 +1331,94 @@ class CheekLayersTest(unittest.TestCase):
             self.assertEqual(int(head["hair"][y, x : x + 6, 3].max()), 0, y)  # the line is the skin's
             self.assertEqual(int(head["skin"][y, x : x + 6, 3].max()), 255, y)
 
+    def cut_with_hair_front(self, hair_front):
+        """cheeks.cut on the source with the given hair_front (and nothing in face_skin)."""
+        w, h = self.SIZE
+        with Image.open(self.project / "source.png") as image:
+            drawn = np.array(image.convert("RGBA"))
+        with Image.open(self.hairmask_path) as image:
+            hairmask = np.array(image.convert("L"))
+        head = {"hair": hair_front, "skin": np.zeros((h, w, 4), np.uint8)}
+        return builder.cheek_pull().cut(drawn, hairmask, self.rig, np.zeros((h, w), bool), builder.polygon_mask, head)
+
+    def test_the_pull_stays_short_of_hair_in_front_beside_the_contour(self):
+        # hair_front has hair beside the lower right contour, outside the face (the dark gap between a jaw and the hair
+        # behind it that a plate's matting lifts as hair in front): a cheek pulled into it would pass under it and come
+        # out in a notch where it ends, so the pull holds back there and eases back in above it
+        cheeks = builder.cheek_pull()
+        w, h = self.SIZE
+        hair_front = np.zeros((h, w, 4), np.uint8)
+        for y in range(276, 330):
+            x = int(round(self.contour(y)[1]))
+            hair_front[y, x + 2 : x + 26] = self.HAIR
+        layers, data, notes, head = self.cut_with_hair_front(hair_front.copy())
+        self.assertIn("right", data, notes)
+        right = data["right"]
+        edge, free = np.array(right["edge"]), np.array(right["free"])
+        self.assertEqual(int(head["hair"][290, int(round(self.contour(290)[1])) + 12, 3]), 255)  # it stays in front
+        self.assertEqual(float(free[edge[:, 1] < 236].min()), 1.0)  # whole above it
+        # beside it the contour does not move out, and above it the contour moved as far as the pull can take it there
+        # (wherever it is centred) stays, with the layer's stroke, short of it
+        for (x, y), share in zip(edge, free):
+            if y >= 272:
+                self.assertLessEqual(share, 0.01, y)
+        stations = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(edge, axis=0).T))])
+        moves = right["travel"] * cheeks.peak(stations / stations[-1]) * free
+        steps = np.gradient(edge, axis=0)
+        normals = np.stack([steps[:, 1], -steps[:, 0]], 1) / np.hypot(*steps.T)[:, None]  # outward on the right
+        for point, normal, move in zip(edge, normals, moves):
+            if move > 0.5:
+                x, y = np.rint(point + normal * (move + cheeks.STROKE)).astype(int)
+                self.assertEqual(int(hair_front[y, x, 3]), 0, (point, move))
+        # and it eases in over about a travel of contour (here some six points): no jump between neighbouring points
+        self.assertLess(float(np.abs(np.diff(free)).max()), 0.35)
+        self.assertGreaterEqual(int(((free > 0.02) & (free < 0.98)).sum()), 3)
+        # the left side, with nothing beside it, is as before
+        plain = self.cut_with_hair_front(np.zeros((h, w, 4), np.uint8))[1]
+        self.assertEqual(data["left"], plain["left"])
+        self.assertNotIn("free", plain["right"])
+
+    def test_residue_of_the_matting_beside_the_contour_moves_to_the_skin(self):
+        # specks and a faint thin line in hair_front a little outside the right contour, past the contour's own line:
+        # residue of the matting, which a pulled cheek would pass under (a dark dot, a short line on the moved cheek).
+        # They move to face_skin, which the pulled cheek covers; a thick lock beside the contour stays hair in front
+        w, h = self.SIZE
+        hair_front = np.zeros((h, w, 4), np.uint8)
+        specks = [(240, 14), (241, 14), (250, 16)]
+        for y, dx in specks:
+            hair_front[y, int(round(self.contour(y)[1])) + dx] = (60, 40, 35, 150)
+        for y in range(226, 292):  # longer than a speck, but one pixel wide and beside the contour all along
+            hair_front[y, int(round(self.contour(y)[1])) + 12] = (70, 50, 40, 90)
+        hair_front[296:306, 280:330] = self.HAIR  # a lock beside the end of the contour, reaching well beyond it
+        before = self.over(np.zeros((h, w, 4), np.uint8) + 255, hair_front)
+        layers, data, notes, head = self.cut_with_hair_front(hair_front)
+        self.assertIn("right", data, notes)
+        for y, dx in [*specks, (230, 12), (260, 12), (288, 12)]:
+            x = int(round(self.contour(y)[1])) + dx
+            self.assertEqual(int(head["hair"][y, x, 3]), 0, (y, dx))
+            self.assertGreater(int(head["skin"][y, x, 3]), 0, (y, dx))
+        self.assertEqual(int(head["hair"][300, 320, 3]), 255)
+        after = self.over(self.over(np.zeros((h, w, 4), np.uint8) + 255, head["skin"]), head["hair"])
+        self.assertLessEqual(float(np.abs(after[..., :3] - before[..., :3]).max()), 2)  # the same picture
+
+    def test_thin_hair_across_the_cheek_does_not_hide_the_contour(self):
+        # two lock tips, 2 px wide, lying across the right cheek down to its contour: the face is seen beyond them, so they
+        # do not hide the contour. The layer reaches the contour along them and the pull is whole there (taken as hiding
+        # it, the layer was cut along the tips and its outline stepped out where they end: a shelf with a light corner)
+        w, h = self.SIZE
+        hair_front = np.zeros((h, w, 4), np.uint8)
+        for i in range(46):
+            for dx in (0, 9):
+                hair_front[226 + i, 248 + i + dx - 9 : 248 + i + dx - 7] = self.HAIR
+        layers, data, notes, head = self.cut_with_hair_front(hair_front)
+        self.assertIn("right", data, notes)
+        self.assertNotIn("free", data["right"])
+        image, rect = layers["cheek_right"]
+        for y in (236, 246, 256, 266):
+            x = int(round(self.contour(y)[1])) - 2
+            self.assertEqual(int(image[y - rect[1], x - rect[0], 3]), 255, y)
+        self.assertEqual(int(head["hair"][250, 263, 3]), 255)  # the tips stay in front
+
 
 class StrandLayersTest(unittest.TestCase):
     """--strand-layers (tools/hair/strands.py): a held lock on its own layer over the base filled in behind it."""

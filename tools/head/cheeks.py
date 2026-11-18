@@ -8,8 +8,8 @@ eyes to above the chin, and the tool writes
   layers.json "cheeks"  {"left": {"edge": [[x, y], ...], "reach": [px, ...], "travel": px, "free": [...]}, "right": ...}:
                   the contour from top to bottom, how far into the face a pull reaches at each of its points (short of
                   the eyes, the nose, the mouth and the chin), the largest pull of the contour in source pixels and,
-                  where hair lies over the contour, how much of the pull each point takes (1 elsewhere; left out when 1
-                  everywhere).
+                  where hair lies over the contour or, in front of the face, beside it, how much of the pull each point
+                  takes (1 elsewhere; left out when 1 everywhere).
 The runtime draws a cheek layer only while that cheek is pulled: over the base, under the eyes, the drawn mouths and the
 hair in front of the face. It moves the layer's contour only outwards, so the old contour and the hair beside the face
 stay covered. base.png is not changed, so runtimes that do not know these layers draw the avatar as before.
@@ -17,7 +17,14 @@ stay covered. base.png is not changed, so runtimes that do not know these layers
 With head layers the contour's own drawn line can sit in hair_front (where the plate or the colours took it for hair).
 Hair in front of the face stays where it is while the cheek moves under it, so the line would stay behind: the pixels of
 hair_front in a narrow band along the contour that are not part of hair reaching beyond that band move to face_skin (the
-two over the base are the same picture), and the cheek layer carries them.
+two over the base are the same picture), and the cheek layer carries them. So do pieces of hair_front further out beside
+the contour, as far as a pull reaches, that are residue of the matting (small, or thin and staying there): the pulled
+cheek covers them. Other hair in front lying beside the contour (a lock beside it, the dark gap between the jaw and the
+hair behind it that a plate's matting lifts) stays in front, and the pull is held short of it: pulled into it, the cheek
+would pass under it and come out where it ends in a spike or a notch. Hair in front thinner than THICK px (lock tips lying
+across the cheek) does not hide the contour: the face is seen beyond it, and the layer is not cut along it. Where hair
+lies over the contour the contour does not move at all; wherever the pull is held back it eases back in like a smoothstep
+over a travel of contour.
 
 A side is left out, and the reason returned, when its contour cannot be traced. Without head layers, hair lying over a
 cheek would be dragged along with it, so the travel shrinks with the share of the cheek such hair covers.
@@ -55,6 +62,11 @@ OUTER = 10  # px outside the contour to which that band reaches
 THICK = 5  # px: in the band, hair_front narrower than this is the contour's line, through which no hair reaches in
 BESIDE = (4, 17)  # px outside the contour (from, to) where hair in front of the face lies beside it, past its own line
 SMOOTH = 0.03  # in L: the traced contour is smoothed over this many rows (a pulled contour must turn smoothly)
+SWEEP = 4  # px beyond the largest pull and the layer's stroke: how far beside the contour a pulled cheek can reach
+SPECK = 40  # px: a piece of hair_front beside the contour this small is residue of the matting, not hair
+ENDS = 0.15  # the runtime's pull eases in and out over this share of the contour at both ends (cheek.ts CHEEK_ENDS)
+CENTRES = (0.35, 0.65)  # where along the contour the runtime can centre its pull (cheek.ts cheekPose)
+HOLD_EASE = 1.0  # in travels: where the pull is held back, it eases back in over this many rows of contour
 
 
 def _sstep(a, b, x):
@@ -79,6 +91,28 @@ def bump(t):
     """Raised cosine over the contour (0 at both ends, 1 in the middle): about the shape of the runtime's pull."""
     t = np.clip(t, 0, 1)
     return 0.5 - 0.5 * np.cos(2 * np.pi * t)
+
+
+def peak(s):
+    """The largest share of the pull that the contour takes at s (0..1) wherever the runtime centres it: its raised cosine
+    (half the contour wide either side of a centre in CENTRES) eased over ENDS at both ends (cheek.ts cheekBump)."""
+    s = np.asarray(s, np.float64)
+    off = np.clip(np.maximum(CENTRES[0] - s, s - CENTRES[1]), 0, None)
+    shape = np.where(off < 0.5, 0.5 + 0.5 * np.cos(2 * np.pi * off), 0.0)
+    return shape * _sstep(0, ENDS, s) * _sstep(0, ENDS, 1 - s)
+
+
+def ease_under(cap, length):
+    """Per row shares (0..1) no larger than `cap` anywhere and rising from each row at most as fast as a smoothstep that
+    reaches 1 after `length` rows: a pull held back at some rows turns into them gently instead of in a step."""
+    cap = np.asarray(cap, np.float64)
+    out = cap.copy()
+    if length <= 0:
+        return out
+    k = np.arange(len(cap))
+    for j in np.nonzero(cap < 1)[0]:
+        out = np.minimum(out, cap[j] + (1 - cap[j]) * _sstep(0, length, np.abs(k - j)))
+    return out
 
 
 def _smooth(values, sigma):
@@ -172,6 +206,17 @@ def _point(f, u, v):
     return f["eyes"] + u * f["across"] + v * f["down"]
 
 
+def _thick(alpha):
+    """Where hair_front (8-bit alpha) is at least THICK px across, with its soft edge."""
+    core = cv2.morphologyEx((alpha >= 128).astype(np.uint8), cv2.MORPH_OPEN, np.ones((THICK, THICK), np.uint8))
+    return (cv2.dilate(core, np.ones((5, 5), np.uint8)) > 0) & (alpha > 0)
+
+
+def _thin(alpha):
+    """hair_front pixels (8-bit alpha) that are not part of hair at least THICK px across: lock tips, single strands."""
+    return (alpha > 0) & ~_thick(alpha)
+
+
 def over(below, above):
     """`above` over `below` (straight 8-bit RGBA)."""
     a = above[..., 3:4].astype(np.float32) / 255
@@ -179,6 +224,62 @@ def over(below, above):
     alpha = a + b * (1 - a)
     colour = (above[..., :3] * a + below[..., :3] * b * (1 - a)) / np.maximum(alpha, 1e-6)
     return np.concatenate([np.clip(np.rint(colour), 0, 255), np.clip(np.rint(alpha * 255), 0, 255)], -1).astype(np.uint8)
+
+
+def _beside(f, half, rect_shape, shape, traced, rows, end, travel, grow=6):
+    """Image masks: where a pulled cheek can reach beside its contour (from the contour out to the largest pull with the
+    layer's stroke, along the span), and the face more than LINE px inside a contour."""
+    sweep_r, deep_r = np.zeros(rect_shape, bool), np.zeros(rect_shape, bool)
+    out = int(math.ceil(travel + STROKE + SWEEP))
+    columns = np.arange(rect_shape[1], dtype=np.float64) - half
+    for sign, smooth, *_ in traced.values():
+        e, span = smooth[: end + 1], rows[: end + 1]
+        r0, r1 = max(int(span[0]) - grow, 0), min(int(span[-1]) + grow, rect_shape[0] - 1)
+        ext = np.interp(np.arange(r0, r1 + 1), span, e)[:, None]
+        band = np.zeros(rect_shape, np.uint8)
+        cv2.polylines(band, [np.rint(np.stack([half + sign * e, span], 1)).astype(np.int32)], False, 255, 2 * out + 1)
+        u = sign * columns[None, :]
+        sweep_r[r0 : r1 + 1] |= (band[r0 : r1 + 1] > 0) & (u >= ext - 1)
+        deep_r[r0 : r1 + 1] |= (u >= 0) & (u < ext - LINE)
+    # the face frame's rows and columns back to the picture
+    to_frame = np.array([[f["across"][0], f["across"][1], half - float(f["eyes"] @ f["across"])],
+                         [f["down"][0], f["down"][1], -float(f["eyes"] @ f["down"])]], np.float64)
+
+    def back(mask):
+        flags = cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP
+        return cv2.warpAffine(mask.astype(np.uint8) * 255, to_frame, (shape[1], shape[0]), flags=flags, borderValue=0) > 0
+
+    return back(sweep_r), back(deep_r)
+
+
+def hold(alpha, f, sign, e, span, travel):
+    """Per contour row (`e` at rows `span`) the share of the pull that keeps the pulled contour, with the layer's stroke,
+    short of hair in front of the face beside it (`alpha`: hair_front's, full size) along the contour's outward normal,
+    wherever the runtime centres its pull, eased so that it turns in gently: the pulled cheek does not pass under that
+    hair to come out where it ends in a step or a notch. Hair at least THICK px across holds the pull anywhere it can
+    reach; thinner hair only within LINE + OUTER px of the contour (an ear's outline, a strand along the contour): a strand
+    further out may cross the pulled cheek in front of it."""
+    de = np.gradient(e) if len(e) > 1 else np.zeros_like(e)
+    norm = np.hypot(1.0, de)
+    normal = (sign / norm)[:, None] * f["across"] + (-de / norm)[:, None] * f["down"]
+    base = f["eyes"] + (sign * e)[:, None] * f["across"] + span[:, None] * f["down"]
+    ts = np.arange(1, int(math.ceil(travel + STROKE + SWEEP)) + 1, dtype=np.float64)
+    pts = np.rint(base[:, None, :] + normal[:, None, :] * ts[None, :, None]).astype(int)
+    h, w = alpha.shape
+    at = (np.clip(pts[..., 1], 0, h - 1), np.clip(pts[..., 0], 0, w - 1))
+    hit = _thick(alpha)[at] | ((alpha[at] >= 128) & (ts[None, :] <= LINE + OUTER))
+    gap = np.where(hit.any(axis=1), ts[np.argmax(hit, axis=1)], np.inf)
+    # how far the contour may move out at each row (all of the travel where nothing is near), and no more than at the rows
+    # within half the spacing of the POINTS written, as the runtime interpolates between them
+    room = np.clip(gap - STROKE - 1, 0, travel) / travel
+    spacing = int(math.ceil((len(e) - 1) / (POINTS - 1) / 2))
+    room = cv2.erode(room.astype(np.float32)[:, None], np.ones((2 * spacing + 1, 1), np.uint8))[:, 0].astype(np.float64)
+    # rising from the held rows like a smoothstep over HOLD_EASE travels: the pulled contour meets the still one there
+    # without a corner. As a share of the pull the contour takes at each row wherever it is centred
+    allowed = ease_under(room, max(4.0, HOLD_EASE * travel))
+    steps = np.hypot(*np.diff(base, axis=0).T)
+    s = np.concatenate([[0.0], np.cumsum(steps)]) / max(float(steps.sum()), 1e-9)
+    return np.clip(allowed / np.maximum(peak(s), 1e-9), 0, 1)
 
 
 def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
@@ -219,11 +320,17 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
     lab = cv2.cvtColor(np.ascontiguousarray(rect_face[..., :3]), cv2.COLOR_RGB2LAB).astype(np.float32)
     rect_hair = warp(np.ascontiguousarray(hair))
     if layered:
-        # where the face is seen: the hair in front of it stops a row there, where the face under it goes on
-        seen = warp(np.ascontiguousarray(over(face, head["hair"])))
+        # where the face is seen: the hair in front of it stops a row there, where the face under it goes on. Hair in front
+        # thinner than THICK px (lock tips lying across the cheek, single strands) does not: the face goes on beyond it,
+        # so it neither hides the contour nor cuts the layer along it
+        thin = _thin(head["hair"][..., 3])
+        thick_hair = head["hair"].copy()
+        thick_hair[thin, 3] = 0
+        seen = warp(np.ascontiguousarray(over(face, thick_hair)))
         seen_lab = cv2.cvtColor(np.ascontiguousarray(seen[..., :3]), cv2.COLOR_RGB2LAB).astype(np.float32)
-        seen_front = warp(np.ascontiguousarray(head["hair"][..., 3]))
-        seen_stop = (seen[..., 3] < 128) | (seen_front >= 128) | (rect_hair >= 128)
+        seen_front = warp(np.ascontiguousarray(thick_hair[..., 3]))
+        near_thin = warp(cv2.dilate(thin.astype(np.uint8) * 255, np.ones((5, 5), np.uint8)), cv2.INTER_NEAREST) > 0
+        seen_stop = (seen[..., 3] < 128) | (seen_front >= 128) | ((rect_hair >= 128) & ~near_thin)
     stop = (rect_face[..., 3] < 128) | (rect_hair >= 128) | (warp(excluded.astype(np.uint8) * 255, cv2.INTER_NEAREST) > 0)
 
     # where each cheek is: the rig's blush points, by their side of the face
@@ -356,6 +463,27 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
         for _ in range(LINE_HAIR):
             reached = cv2.dilate(reached, np.ones((3, 3), np.uint8)) & within
         moved = (band > 0) & (alpha > 0) & (reached == 0)
+        # beside each contour, as far out as a pull with the layer's stroke can reach: pieces of hair_front there that are
+        # residue of the matting (no larger than SPECK px, or thinner than THICK px and staying beside the contour, and
+        # neither reaching more than LINE px into the face) go to face_skin as well, so a pulled cheek covers them instead
+        # of passing under them (a dark dot or a short line on the moved cheek). Larger hair beside the contour stays in
+        # front, and the pull is held short of it (hold)
+        sweep, deep = _beside(f, half, lab.shape[:2], (h, w), traced, rows, end, travel)
+        pieces = (alpha > 12) & ~moved
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(pieces.astype(np.uint8), connectivity=8)
+        if count > 1:
+            def tally(mask):
+                return np.bincount(labels[mask & pieces], minlength=count)
+
+            area = stats[:, cv2.CC_STAT_AREA]
+            near = cv2.dilate((sweep | (band > 0)).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+            thin_piece = (tally(_thick(alpha)) == 0) & (tally(near) == area)
+            residue = (tally(sweep) > 0) & (tally(deep) == 0) & ((area <= SPECK) | thin_piece)
+            residue[0] = False
+            if residue.any():
+                speck = residue[labels]
+                faint = (cv2.dilate(speck.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0) & (alpha > 0) & (alpha <= 12)
+                moved |= speck | faint
         if moved.any():
             hair_layer, skin_layer = head["hair"].copy(), head["skin"].copy()
             skin_layer[moved] = over(skin_layer[moved][None], hair_layer[moved][None])[0]
@@ -365,13 +493,15 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
     span = rows[: end + 1]
     t = (span - span[0]) / max(1, span[-1] - span[0])
     along = bump(t)
+    front_alpha = head["hair"][..., 3] if layered else None
     for side, (sign, smooth, fronts, skin, covered, seen_edges) in traced.items():
         e = smooth[: end + 1]
         # the contour stays where hair lies over it (the hair in front of the face, or any hair without head layers):
         # pulled there it would come out from under that hair
         near = cv2.dilate(covered[: end + 1].astype(np.uint8)[:, None], np.ones((2 * int(COVER_EASE * L) + 1, 1), np.uint8))[:, 0]
-        # eased in over about one and a half travels of contour, so the pulled contour turns out of the still one gently
-        free = np.clip(1 - _smooth(near.astype(np.float64), max(2.0, 2 * COVER_EASE * L, 0.75 * travel)) * 1.2, 0, 1)
+        # none of it there, then eased in over about a travel of contour, so the pulled contour turns out of the still one
+        # gently (smoothing the rows over leaked a little of the pull into them: a step where the layer ends at that hair)
+        free = ease_under(np.where(near > 0, 0.0, 1.0), max(4.0, HOLD_EASE * travel))
         cols = half + sign * e
         inner = np.clip(np.rint(cols - sign * 2), 0, lab.shape[1] - 1).astype(int)
         raw = clearance[span, inner]
@@ -396,6 +526,11 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
         if side_travel < MIN_TRAVEL * travel:
             notes.append(f"{side}: hair lies over {share:.0%} of the cheek")
             continue
+        if layered:
+            # hair in front of the face lying beside the contour (a lock beside it, the dark gap between the jaw and the
+            # hair that the plate's matting took for hair in front): pulled into it, the cheek would pass under that hair
+            # and come out where it ends in a step or a notch. The pull stays short of it and eases back in
+            free = np.minimum(free, hold(front_alpha, f, sign, e, span, side_travel))
         # the layer: from the contour's drawn line inwards past the reach, a little longer than the span
         grow = 6
         vv_edge = np.concatenate([np.full(grow, span[0]) - np.arange(grow, 0, -1), span, span[-1] + np.arange(1, grow + 1)])
