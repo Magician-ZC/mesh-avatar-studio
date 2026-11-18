@@ -1188,7 +1188,7 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
     strand_notes = []
     if strand_layers_on and any(s.get("reach") for s in rig.get("strands", [])):
         drawn = images.get("base_bare", images.get("base_cloth", images["base"]))
-        cut, data, strand_notes = strand_layers().cut(drawn, external_hair if external_hair is not None else images["hairmask"], rig, smooth_fill)
+        cut, data, strand_notes = strand_layers().cut(drawn, external_hair if external_hair is not None else images["hairmask"], rig)
         for name, (image, rect) in cut.items():
             store(name, image, rect)
         if data:

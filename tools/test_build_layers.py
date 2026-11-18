@@ -1477,15 +1477,70 @@ class StrandLayersTest(unittest.TestCase):
         a = lock[..., 3:4].astype(np.float32) / 255
         drawn = lock[..., :3] * a + plate[..., :3] * (1 - a)
         window = (slice(y, y + h), slice(x, x + w))
-        self.assertLessEqual(np.abs(drawn[window] - base[window][..., :3]).max(), 1)
-        # the lock is the dark hair; under it the plate is skin, opaque
+        self.assertLessEqual(np.abs(drawn[window] - base[window][..., :3]).max(), 5)  # TOLERANCE where told apart
+        # the lock is the dark hair; under it the plate is skin, opaque (below its root, where it keeps the hair above)
         self.assertTrue((lock[60:140, 52:61, 3] == 255).all())
         self.assertTrue((plate[60:140, 52:61, 3] == 255).all())
-        self.assertGreater(plate[60:140, 52:61, 0].min(), 200)
+        self.assertGreater(plate[70:140, 52:61, 0].min(), 200)
         # the plate reaches as far round the strand as the base bends with it
         self.assertLessEqual(x, 56 - 2 * 6)
         self.assertGreaterEqual(x + w, 56 + 2 * 6)
         self.assertGreaterEqual(meta["strands"]["lock"]["unsure"], 0)
+
+    @staticmethod
+    def shrunk(image, k=4):
+        """Premultiplied, averaged over k x k blocks: a display's mip level of the texture."""
+        image = image.astype(np.float32)
+        image = np.concatenate([image[..., :3] * image[..., 3:4] / 255, image[..., 3:4]], axis=2)
+        h, w = image.shape[0] // k * k, image.shape[1] // k * k
+        return image[:h, :w].reshape(h // k, k, w // k, k, -1).mean(axis=(1, 3))
+
+    def test_a_lock_cut_out_of_more_hair_shows_no_seam_however_it_is_filtered(self):
+        # the hair goes on above the lock's root (and the mask with it): the cut there lies over the hair the plate
+        # keeps, so a display's mip levels of the two show the hair, not a light line of the fill under the cut
+        image = Image.open(self.project / "source.png").convert("RGBA")
+        ImageDraw.Draw(image).rectangle((44, 20, 68, 150), fill=(40, 30, 28, 255))
+        for k in range(46, 68, 4):  # strands, so the cut is not across flat colour
+            ImageDraw.Draw(image).line((k, 20, k, 150), fill=(70, 52, 44, 255))
+        image.save(self.project / "source.png")
+        hair = Image.new("L", (120, 160), 0)
+        ImageDraw.Draw(hair).rectangle((44, 20, 68, 150), fill=255)
+        hair.save(self.project / "hair.png")
+        result = self.build("--strand-layers")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        meta = json.loads((self.project / "built/layers.json").read_text())
+        with Image.open(self.project / "built/base.png") as built:
+            base = np.array(built.convert("RGBA")).astype(np.float32)
+        lock, _ = self.layer(meta, "strand_0")
+        plate, (x, y, w, h) = self.layer(meta, "strand_0_under")
+        under = base.copy()
+        under[y : y + h, x : x + w] = plate[y : y + h, x : x + w]  # the plate replaces the base in its rect
+        for k in (1, 2, 4):  # each texture filtered on its own, then the lock drawn over the plate, across the root
+            top, bottom = self.shrunk(lock, k), self.shrunk(under, k)
+            drawn = top + bottom * (1 - top[..., 3:4] / 255)
+            rows, cols = slice(24 // k, 72 // k), slice(48 // k, 64 // k)
+            self.assertLessEqual(np.abs(drawn - self.shrunk(base, k))[rows, cols].max(), 6, k)
+        # the plate keeps the hair under the root and goes over to the skin further down
+        self.assertLess(plate[45:50, 52:61, 0].max(), 100)
+        self.assertGreater(plate[100:140, 52:61, 0].min(), 200)
+
+    def test_thin_hairs_go_with_the_lock_and_a_garment_line_under_it_stays(self):
+        image = Image.open(self.project / "source.png").convert("RGBA")
+        draw = ImageDraw.Draw(image)
+        draw.line((20, 100, 100, 100), fill=(120, 60, 50, 255), width=2)  # a seam under the lock, on beyond it
+        draw.rectangle((50, 40, 62, 150), fill=(40, 30, 28, 255))
+        draw.line((64, 118, 64, 140), fill=(60, 45, 40, 255), width=1)  # a thin hair by it, not in the mask
+        image.save(self.project / "source.png")
+        result = self.build("--strand-layers")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        meta = json.loads((self.project / "built/layers.json").read_text())
+        lock, _ = self.layer(meta, "strand_0")
+        plate, _ = self.layer(meta, "strand_0_under")
+        hair = [(64, 118 + t) for t in range(0, 23)]
+        self.assertGreater(min(lock[yy, xx, 3] for xx, yy in hair), 128)
+        self.assertGreater(min(plate[yy, xx, 0] for xx, yy in hair), 200)  # skin under it, no hair left behind
+        self.assertTrue((lock[100:102, 67:72, 3] == 0).all())  # the seam beside the lock stays in the plate
+        self.assertTrue((plate[100:102, 67:72, 0] < 160).all())
 
     def test_without_reach_or_option_nothing_changes(self):
         self.assertEqual(self.build(reach=None).returncode, 0)
