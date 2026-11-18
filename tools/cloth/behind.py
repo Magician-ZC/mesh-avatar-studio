@@ -13,7 +13,10 @@ factor (a hole as large as a bag stays quick); each pixel then copies the full-r
 from, so the fill keeps the drawing's own detail, and the seams between patches are blended by letting neighbours vote.
 
 Its silhouette is the figure's outline interpolated across the hole (masked averages down an image pyramid of the
-alpha): the garment goes on behind the accessory as far as the figure does around it and stops at a smooth edge.
+alpha): the garment goes on behind the accessory as far as the figure does around it and stops at a smooth edge. It never
+goes behind the accessory's own soft edge onto the background (the picture's pixels there are not solid: the inside of a
+strap loop, the matte's antialiased rim): the accessory's layer draws those pixels whole, colour and coverage, so anything
+behind them would show at rest; the base stays transparent there, as under a limb's antialiased silhouette.
 
 Only numpy and OpenCV, no learned model: the same picture always gives the same fill.
 """
@@ -29,6 +32,7 @@ PATCH = 22  # px at full resolution: the side of a copied patch
 SEARCH = 360  # px at full resolution: how far from a patch its source is looked for
 COARSE = 50_000  # most hole pixels the search runs on (the grid is coarser by a whole factor until it is no more)
 EDGE = 4  # px: source patches stay this far inside the figure (its own edge and line art are not the garment)
+SOLID = 250  # picture alpha from which a pixel inside the hole is solid, not the accessory's soft edge onto the background
 VOTE = 3  # px: neighbours that vote on each filled pixel at full resolution
 PRIORITY_FLOOR = 0.05  # added to the data term, so a flat front still fills from where most is known
 WIDE = 40  # px: the hole's parts wider than a disk of this radius are copied whole (a strap, beads and all, is not)
@@ -259,6 +263,8 @@ def fill(rgba, hole, source):
     behind = part & (level >= 0.5)
     soft = cv2.GaussianBlur(np.where(part, behind, here[..., 3] >= 128).astype(np.float32), (0, 0), 0.7)
     region[..., 3][part] = np.clip(np.round(soft[part] * 255), 0, 255).astype(np.uint8)
+    # nothing behind the accessory's soft edge onto the background: its layer draws those pixels whole
+    region[..., 3][part & (here[..., 3] < SOLID)] = 0
     figure = cv2.erode((here[..., 3] >= 128).astype(np.uint8), np.ones((2 * EDGE + 1, 2 * EDGE + 1), np.uint8)) > 0
     source = source[window] & ~part & figure
     # colours where no patch reaches, and under the soft edge

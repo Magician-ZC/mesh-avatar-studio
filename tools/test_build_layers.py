@@ -1178,6 +1178,36 @@ class HemBandTest(unittest.TestCase):
         self.assertGreater(float((np.abs(rows - beside).max(axis=1) < 30).mean()), 0.85)
         self.assertGreater(float(rows.std(axis=0).max()), 25)
 
+    def test_behind_an_accessory_s_soft_edge_onto_the_background_nothing_is_added(self):
+        # a strap over the skirt, cut by an outline, with a narrow slit in it where the background shows through (the
+        # inside of a strap loop): the slit is transparent and its rim antialiased. The strap's layer draws the rim
+        # pixels whole, colour and coverage, so the base behind them stays transparent and at rest the picture is
+        # unchanged; behind the strap's solid pixels the skirt goes on as before
+        w, h = self.SIZE
+        picture = self.source.copy()
+        picture[140:201, 94:102] = (60, 40, 30, 255)
+        picture[163:178, 96:100, 3] = 120  # the rim round the slit
+        picture[164:177, 97:99, 3] = 0
+        Image.fromarray(picture).save(self.project / "source.png")
+        self.rig["accessories"] = [{"name": "strap", "pivot": [98, 140], "tip": [98, 200], "split": 0.5,
+                                    "box": [94, 140, 102, 201], "color": {"redness": 1, "minRed": 255},
+                                    "outline": [[94, 140], [101, 140], [101, 200], [94, 200]]}]
+        self.rig["cloth"][0]["outline"] = [[64, self.WAIST + 3], [136, self.WAIST + 3], [158, self.HEM - 5], [42, self.HEM - 5],
+                                           [56, 140], [93, 140], [93, 201], [102, 201], [102, 139], [56, 139]]
+        result = self.build("--cloth-under", "hem")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bare, garment, strap = self.image("base_cloth"), self.layer("cloth_skirt"), self.layer("strap")
+        rest = self.over(self.over(bare.astype(np.float32), garment.astype(np.float32)), strap.astype(np.float32))
+        seen = lambda im: im[..., :3] * (im[..., 3:4] / 255)
+        window = (slice(136, 205), slice(90, 106))
+        error = np.abs(seen(rest) - seen(picture.astype(np.float32))).max(-1)[window]
+        self.assertLessEqual(float(error.max()), 1.0)
+        rim = (picture[..., 3] == 120)
+        self.assertGreater(int(rim.sum()), 20)
+        self.assertTrue((bare[..., 3][rim] == 0).all())
+        # the skirt goes on behind the strap's solid pixels, opaque
+        self.assertTrue((bare[150:160, 95:101, 3] == 255).all())
+
     def test_without_legs_the_band_is_transparent_and_it_is_as_deep_as_the_travel_allows(self):
         counts = {}
         for travel in (8, 16):
