@@ -720,6 +720,15 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
         if cloth.get("material"):
             outline[foreground_limbs] = 0
         masks[cloth["name"]] = outline
+    knit_front = np.zeros(shape, np.uint8)
+    for cloth in rig["cloth"]:
+        if cloth.get("material") == "knit":
+            knit_front |= masks[cloth["name"]]
+    for cloth in rig["cloth"]:
+        if cloth.get("material") == "woven":
+            # The bound knit is the visible front between the lapels. A coarse lapel
+            # outline or its hem ring must not carry a duplicate strip of the pullover.
+            masks[cloth["name"]] &= ~knit_front
     front = np.zeros(shape, np.uint8)
     for cloth in rig["cloth"]:
         if not cloth.get("behind"):
@@ -735,6 +744,15 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
         mask = masks[cloth["name"]] & ~taken
         if cloth.get("behind"):
             mask &= ~front
+        if cloth.get("material") == "knit":
+            # Shoulder seams and the waistband are attached. Only the neckline opens,
+            # and the approved innerwear is already aligned to that opening.
+            if covered is not None:
+                mask &= ~covered
+            taken |= mask
+            material_edges |= (mask > 0) & soft_alpha
+            store(f"cloth_{cloth['name']}", *crop_layer(rgba, mask, soft=False))
+            continue
         if cloth_under == "hem" and not cloth.get("behind"):
             others = np.zeros(shape, np.uint8)
             for other in rig["cloth"]:
@@ -743,6 +761,8 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
             keep_out = (others | taken | (covered if covered is not None else 0)) > 0
             if cloth.get("material"):
                 keep_out |= foreground_limbs
+            if cloth.get("material") == "woven":
+                keep_out |= knit_front > 0
             region, band, fill, report = hem_band().band(rgba, mask, cloth, legs, keep_out)
             if occluders is not None:
                 fill = behind_front(rgba, region, band, fill, occluders)
@@ -772,6 +792,28 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
         print("cloth: no source_under.png; filling the garment area by inpainting")
         bare = inpaint_rgba(base, cv2.dilate(taken, np.ones((7, 7), np.uint8)))
     images["base_cloth"] = bare
+
+
+def matte_knit_collar(sprite, source, patch, coverage, delta, margin, bare):
+    """Unmix the antialiased lip from the original skin so the edge stays cloth-coloured when pulled."""
+    background = patch[..., :3].astype(np.float32)
+    original = source[..., :3].astype(np.float32)
+    difference = original - background
+    band = coverage & (np.abs(delta) <= margin)
+    distance = np.where(band, np.sum(difference * difference, axis=2), -1)
+    ink = np.argmax(distance, axis=0)
+    ref = difference[ink, np.arange(source.shape[1])]
+    alpha = np.sum(difference * ref[None], axis=2) / np.maximum(np.sum(ref * ref, axis=1)[None], 1)
+    # A minimum alpha for each channel keeps the straight foreground RGB in gamut.
+    minimum = np.maximum(-difference / np.maximum(background, 1),
+                         difference / np.maximum(255 - background, 1)).max(axis=2)
+    alpha = np.minimum(255, np.ceil(255 * np.maximum(minimum, alpha))).clip(0, 255).astype(np.uint8)
+    soft = band & (np.arange(source.shape[0])[:, None] < ink[None]) & (alpha < 255)
+    if soft.any():
+        foreground = background[soft] + difference[soft] * (255 / np.maximum(1., alpha[soft, None]))
+        sprite[..., :3][soft] = np.clip(np.rint(foreground), 0, 255).astype(np.uint8)
+        sprite[..., 3][soft] = alpha[soft]
+        bare[soft] = patch[soft]
 
 
 def build_garment_underlayers(folder, entries, rig, meta, images, store, rgba):
@@ -889,6 +931,24 @@ def build_garment_underlayers(folder, entries, rig, meta, images, store, rgba):
             data["rect"] = store_local(layer, np.asarray(preview))
             layers[name] = data
             continue
+        if cloth.get("material") == "knit" and cloth.get("neckline"):
+            # The drawn collar includes an antialiased ink line on the skin side.
+            # Carry that line with the moving knit and continue the wearer's adjacent
+            # exposed skin across its old position, right up to the approved patch.
+            rim = np.asarray(cloth["neckline"])
+            cols = np.arange(x, x + w)
+            rim_y = np.interp(cols, rim[:, 0], rim[:, 1])
+            margin = max(2, round(.014 * np.ptp(rim[:, 0])))
+            delta = np.arange(y, y + h)[:, None] - rim_y
+            seam = ((cols >= rim[0, 0]) & (cols <= rim[-1, 0])
+                    & (delta >= -margin) & (delta <= margin) & (images[key][..., 3] == 255))
+            sample = np.stack([rgba[np.clip(np.rint(rim_y - d).astype(int), 0, rgba.shape[0] - 1), cols]
+                               for d in range(margin, margin + 3)])
+            skin = cv2.GaussianBlur(np.median(sample, axis=0).astype(np.float32)[None], (5, 1), 0)[0]
+            weight = np.clip(delta / margin, 0, 1) * (patch[..., 3] / 255)
+            colour = skin[None, :, :3] * (1 - weight[..., None]) + patch[..., :3] * weight[..., None]
+            patch[..., :3][seam] = np.rint(colour[seam]).astype(np.uint8)
+            patch[..., 3][seam] = 255
         # Preserve the original anti-aliased outer edge at rest and exclude holes cut for foreground objects.
         coverage = (patch[..., 3] == 255) & (images[f"cloth_{name}"][..., 3] == 255)
         if not coverage.any():
@@ -897,6 +957,9 @@ def build_garment_underlayers(folder, entries, rig, meta, images, store, rgba):
         if result is None:
             result = drawn.copy()
         result[y:y + h, x:x + w][coverage] = patch[coverage]
+        if cloth.get("material") == "knit" and cloth.get("neckline"):
+            matte_knit_collar(images[key], rgba[y:y + h, x:x + w], patch, coverage,
+                              delta, margin, drawn[y:y + h, x:x + w])
         sx, sy, sw, sh = cv2.boundingRect(coverage.astype(np.uint8))
         layer = f"under_{name}"
         rect = [x + sx, y + sy, sw, sh]

@@ -15,6 +15,7 @@ function surface(material?: Cloth['material'], approved = true) {
   const rig = JSON.parse(new TextDecoder().decode(sampleFiles()['rig.json'])) as Rig;
   rig.body.softChest = { left: { cx: 30, cy: 50, rx: 25, ry: 30 }, right: { cx: 70, cy: 50, rx: 25, ry: 30 } };
   const cloth: Cloth = { name: 'sample', material, outline: [[0, 0], [100, 0], [100, 100], [0, 100]], waist: [[0, 0], [100, 0]], hem: [[0, 100], [100, 100]], reach: 30, max: 5 };
+  if (material === 'knit') cloth.neckline = [[0, 0], [50, 10], [100, 0]];
   rig.cloth = material ? [cloth] : [];
   const model = new SoftSurfaces(rig, new Set(approved ? ['sample'] : []));
   model.attach(layer, material ? cloth : undefined);
@@ -45,6 +46,22 @@ test('chest follows a circular hold, its depth expands or compresses independent
   expect(light[3]).toBeLessThan(-0.1); expect(-light[3]).toBeLessThan(forward * 0.5);
   model.release(target, 0, 0); frames(150);
   expect(offset(30, 50)).toEqual([0, 0]); expect(light[3]).toBe(0);
+});
+
+test('a fitted knit carries a chest-level pull to the neck and stays attached at the shoulders and hem', () => {
+  const { model, target, frames, offset } = surface('knit');
+  expect(model.hold(target, 50, 50)).toBe(true);
+  for (const [dx, dy, depth] of [[90, 0, 0], [0, 90, 0], [0, 0, 1]]) {
+    model.move(target, dx, dy, depth); frames(50);
+    expect(offset(50, 10)[1]).toBeGreaterThan(8);
+    expect(offset(0, 0)).toEqual([0, 0]); expect(offset(100, 0)).toEqual([0, 0]);
+    expect(offset(50, 100)).toEqual([0, 0]);
+  }
+  model.release(target, 0, 0); frames(150);
+  expect(offset(50, 10)).toEqual([0, 0]);
+  const uncut = surface('knit', false);
+  uncut.model.hold(uncut.target, 50, 50); uncut.model.move(uncut.target, 25, 35, 1); uncut.frames(50);
+  expect(uncut.offset(50, 10)).toEqual([0, 0]);
 });
 
 test('a stocking pulls across the leg, a skirt lifts from its hem, and its waistband stays attached', () => {

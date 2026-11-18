@@ -49,7 +49,9 @@ export interface ClothTuning {
 }
 export interface Cloth extends Partial<ClothTuning> {
   /** Surface attachment and material response for a sustained local grab. */
-  material?: 'stocking' | 'pleat' | 'woven';
+  material?: 'stocking' | 'pleat' | 'woven' | 'knit';
+  /** Visible upper edge of a knit top, ordered from the left shoulder to the right. */
+  neckline?: Point[];
   /** Physical image scale in millimetres per source pixel; inferred if omitted. */
   scale?: number;
   name: string;

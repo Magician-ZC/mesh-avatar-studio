@@ -44,7 +44,7 @@ export function createCloth(engine, rig) {
 
   const garments = (rig.cloth ?? []).map(c => {
     const grid = clothGrid(c);
-    const fitted = c.material === 'stocking' || c.material === 'woven';
+    const fitted = c.material === 'stocking' || c.material === 'woven' || c.material === 'knit';
     const cols = grid.custom ? grid.cols : (c.columns ?? 8), rows = grid.custom ? grid.rows : (c.rows ?? 5);
     const top = resample(c.waist, cols), bot = resample(c.hem, cols);
     const rest = new Float64Array(rows * cols * 2);

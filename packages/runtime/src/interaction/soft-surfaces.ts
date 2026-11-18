@@ -54,6 +54,14 @@ function seamDistance(x: number, y: number, seam: Point[]): number {
   return distance;
 }
 
+function lineHeight(line: Point[], x: number): number {
+  let i = 1;
+  while (i + 1 < line.length && x > line[i][0]) i++;
+  const [a, b] = [line[i - 1], line[i]];
+  const t = clamp((x - a[0]) / (b[0] - a[0] || 1), 0, 1);
+  return a[1] + (b[1] - a[1]) * t;
+}
+
 class Surface {
   private patches: Patch[] = [];
   readonly displacement = [0, 0, 0];
@@ -71,12 +79,17 @@ class Surface {
   private readonly cloth: Cloth | null;
   private readonly side: number;
   private readonly support: number;
+  private readonly knit?: { neck: Point[]; hem: Point[]; left: number; right: number; opens: boolean };
   constructor(ellipse: Ellipse, cloth: Cloth | null, side: number, support: number, availableTravel?: number) {
     this.cloth = cloth; this.side = side; this.support = support;
     this.centre = [ellipse.cx, ellipse.cy];
     this.radius = [ellipse.rx, ellipse.ry];
     const travel = cloth?.reach ?? Math.min(...this.radius) * (cloth ? 0.65 : 0.45);
     this.reach = Math.min(travel, availableTravel ?? travel);
+    if (cloth?.material === 'knit') {
+      const xs = cloth.outline.map(point => point[0]);
+      this.knit = { neck: cloth.neckline ?? cloth.waist, hem: cloth.hem, left: Math.min(...xs), right: Math.max(...xs), opens: availableTravel === undefined };
+    }
   }
 
   addLayer(layer: Layer, slot: number) {
@@ -88,6 +101,26 @@ class Surface {
   private weight(x: number, y: number) {
     const u = (x - this.centre[0]) / this.radius[0], v = (y - this.centre[1]) / this.radius[1];
     const edge = Math.max(0, 1 - u * u - v * v);
+    if (this.knit) {
+      const { neck, hem, opens } = this.knit;
+      const left = neck[0][0], width = neck[neck.length - 1][0] - left;
+      const across = clamp((x - left) / width, 0, 1);
+      // The neck band ends at the shoulder seams. Ribbed columns carry a chest-level
+      // pull up to the free lip, while the tucked lower edge stays with the torso.
+      const shoulders = 4 * across * (1 - across);
+      const top = lineHeight(neck, x), bottom = lineHeight(hem, x);
+      const along = clamp((y - top) / Math.max(1, bottom - top), 0, 1);
+      const fromHem = clamp((1 - along) / .65, 0, 1);
+      const fixedHem = fromHem * fromHem * (3 - 2 * fromHem);
+      // Below the shoulder attachments, even a grip to one side can stretch the
+      // chest panel; the outside armholes still stay with the jacket/sleeves.
+      const fromSide = clamp(Math.min(x - this.knit.left, this.knit.right - x) / (.14 * (this.knit.right - this.knit.left)), 0, 1);
+      const panel = shoulders + (fromSide - shoulders) * Math.min(1, along / .3);
+      const columns = Math.exp(-(((x - this.centre[0]) / (.65 * width)) ** 2));
+      const transmission = columns * Math.exp(-Math.max(0, y - this.centre[1]) / this.radius[1]);
+      const collar = opens ? 1 : Math.min(1, along * 4);
+      return fixedHem * collar * Math.max(edge * edge * panel, transmission * shoulders);
+    }
     // A compact smooth surface fixes the surrounding rib cage / cloth. Pin cloth to its sewn edge.
     const attach = this.cloth && this.cloth.material !== 'stocking'
       ? Math.min(1, seamDistance(x, y, this.cloth.waist) / (this.radius[1] * 0.42)) : 1;
@@ -157,7 +190,7 @@ class Surface {
       // The leg supports a stocking along its length. A pleat unfolds towards its waistband
       // and tightens quickly when pulled down or across neighbouring folds.
       const material = this.cloth?.material;
-      const horizontal = material === 'pleat' ? 0.55 : 1;
+      const horizontal = material === 'pleat' ? 0.55 : material === 'knit' ? 0.66 : 1;
       const vertical = material === 'stocking' ? 0.36 : material === 'pleat' && y > 0 ? 0.32 : 1;
       const length = Math.hypot(x / horizontal, y / vertical) / travel;
       const gain = length ? Math.tanh(length) / length : 0;
@@ -184,6 +217,9 @@ class Surface {
     }
     const c = Math.cos(this.angle), s = Math.sin(this.angle), [dx, dy, z] = d;
     const active = Math.abs(dx) + Math.abs(dy) + Math.abs(z) > 0.003;
+    // The lip of a top pulled towards the camera projects downwards in a front view.
+    // A lateral pull also lowers the near side as the ribbing stretches.
+    const knitDrop = this.knit ? clamp(dy + Math.abs(dx) * .52 + Math.max(0, z) * .78, -.45 * this.reach, this.reach) : 0;
     for (const p of this.patches) {
       // Shader reads all lobes in rest space; the normal of a stretched sock also highlights its direction of tension.
       const strength = this.cloth ? (z + Math.hypot(dx, dy) * 0.38) / this.reach : z / this.reach;
@@ -194,7 +230,7 @@ class Surface {
         const u = (p.mesh.rest[i] - this.centre[0]) / this.radius[0], h = (p.mesh.rest[i + 1] - this.centre[1]) / this.radius[1];
         // Compression spreads tissue in-plane; forward stretch narrows it. A raised pleat turns towards the viewer.
         const x = dx + z * (0.22 * this.side - (this.cloth ? 0.18 : 0.68) * u);
-        const y = dy - z * (0.22 + (this.cloth ? 0.16 : 0.46) * h);
+        const y = this.knit ? knitDrop : dy - z * (0.22 + (this.cloth ? 0.16 : 0.46) * h);
         p.mesh.pos[i] += weight * (c * x - s * y);
         p.mesh.pos[i + 1] += weight * (s * x + c * y);
       }
@@ -215,7 +251,7 @@ export class SoftSurfaces {
       const { width, height } = bounds(cloth.outline), pleat = cloth.material === 'pleat';
       // A pleat transmits strain along its fold; elastic knits spread it across a smaller patch.
       const rx = Math.max(2, width * (pleat ? 0.27 : 0.42), (cloth.reach ?? 0) * (pleat ? 1.0 : 1.65));
-      const ry = Math.max(2, Math.min(height * (pleat ? 0.76 : 0.42), rx * (pleat ? 3.2 : 1.75)));
+      const ry = Math.max(2, Math.min(height * (pleat || cloth.material === 'knit' ? 0.76 : 0.42), rx * (pleat ? 3.2 : 1.75)));
       // Without an authored underlayer, the builder only fills the narrow band sized for passive travel.
       const available = underlayers.has(cloth.name) ? undefined : cloth.max ?? 20;
       this.fabrics.set(cloth.name, new Surface({ cx: 0, cy: 0, rx, ry }, cloth, 0, 0, available));
@@ -224,7 +260,7 @@ export class SoftSurfaces {
     this.gravity = [Math.cos(a), Math.sin(a)];
   }
   attach(layer: Layer, cloth?: Cloth) {
-    if (!cloth || cloth.material === 'woven') for (const [side, surface] of this.chest) surface.addLayer(layer, side === 'left' ? 0 : 1);
+    if (!cloth || cloth.material === 'woven' || cloth.material === 'knit') for (const [side, surface] of this.chest) surface.addLayer(layer, side === 'left' ? 0 : 1);
     if (cloth) this.fabrics.get(cloth.name)?.addLayer(layer, 2);
   }
   private get(t: SurfaceTarget) { return t.kind === 'chest' ? this.chest.get(t.side) : this.fabrics.get(t.name); }
