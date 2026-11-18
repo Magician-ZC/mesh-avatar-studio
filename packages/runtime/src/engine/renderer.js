@@ -12,6 +12,7 @@ export function createRenderer(engine, rig) {
   // ER6: the whole drawing turns by rig.view.rotation about the image centre; 0 keeps the original shaders and fit
   const ROTATION = viewRotation(rig);
   const hasSurfaceLighting = Boolean(rig.body.softChest || rig.cloth?.some(cloth => cloth.material));
+  const hasStockings = rig.cloth?.some(cloth => cloth.material === 'stocking');
   // WebGL2 renderer: textured grid meshes whose vertices are deformed on the CPU,
   // plus a fragment-shader pass for eyelids, eye balls, mouth and blush on the base layer.
 
@@ -26,6 +27,25 @@ export function createRenderer(engine, rig) {
   const surfaceUniforms = hasSurfaceLighting ? `
   uniform vec4 uGripLight[3]; // local centres, radii and signed thickness for the drawn surface
   uniform vec4 uHemContact[2]; // image x of the legs and gap, then the corresponding contact opacity changes` : '';
+  const stockingUniforms = hasStockings ? `
+  uniform sampler2D uStockingBody;
+  uniform vec2 uStockingBodySize;
+  uniform vec4 uStockingTension[2];` : '';
+  const stockingShading = hasStockings ? `
+    vec4 grip = uStockingTension[0], footprint = uStockingTension[1];
+    if (footprint.z > 0.0 && c.a > 0.0) {
+      vec2 v = p - grip.xy;
+      vec2 q = vec2(dot(v, grip.zw), dot(v, vec2(-grip.w, grip.z))) / footprint.xy;
+      float strain = (1.0 - smoothstep(0.0, 1.0, length(q))) * footprint.z;
+      // Opening the weave transmits more of the fixed leg colour. Keep the original
+      // silhouette and shading in texels for which the artwork has no painted skin.
+      vec4 leg = texture(uStockingBody, p / uStockingBodySize);
+      vec3 yarn = c.rgb / c.a;
+      vec3 thinned = pow(yarn, vec3(0.68));
+      vec3 skin = leg.rgb / max(leg.a, 0.001);
+      float paintedSkin = leg.a * smoothstep(0.03, 0.16, length(skin - yarn));
+      c.rgb = mix(c.rgb, c.a * mix(thinned, skin, 0.78 * paintedSkin), 0.72 * strain);
+    }` : '';
   const surfaceShading = hasSurfaceLighting ? `
     for (int i = 0; i < 3; ++i) {
       vec4 s = uGripLight[i];
@@ -60,6 +80,7 @@ export function createRenderer(engine, rig) {
   uniform float uCheek;
   uniform vec4 uPull[2];     // per cheek layer: swell centre (rest px), radius (px), depth (-1..1, 0 = none)
 ${surfaceUniforms}
+${stockingUniforms}
   const int EYE_N = 24;
   float crv(int e, bool top, float u) {
     float f = clamp(u, 0.0, 1.0) * float(EYE_N - 1);
@@ -202,7 +223,7 @@ ${surfaceUniforms}
       c = eyeLayer(uFace - (kind == 2 ? 8 : (kind == 1 ? 6 : 2)), p, kind);
     } else {
       c = texAt(p);
-    }${surfaceShading}
+    }${surfaceShading}${stockingShading}
     outColor = c * uAlpha;
   }`;
 
@@ -485,6 +506,13 @@ ${surfaceUniforms}
       gl.uniform2fv(m.u.uScale, this.scale); gl.uniform2fv(m.u.uOffset, this.offset);
       if (ROTATION) gl.uniform4f(m.u.uView, this.view.cos, this.view.sin, this.view.centre[0], this.view.centre[1]);
       gl.uniform1i(m.u.uTex, 0);
+      if (hasStockings) {
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, this.stockingBody);
+        gl.uniform1i(m.u.uStockingBody, this.stockingBody ? 2 : 0);
+        gl.uniform2f(m.u.uStockingBodySize, rig.image.width, rig.image.height);
+        gl.activeTexture(gl.TEXTURE0);
+      }
       gl.uniform4fv(m.u.uEyeBox, EYES.flatMap(e => [e.x0, e.x1, 0, 0]));
       gl.uniform1fv(m.u.uEyeTop, EYES.flatMap(e => e.top));
       gl.uniform1fv(m.u.uEyeBot, EYES.flatMap(e => e.bot));
@@ -538,6 +566,7 @@ ${surfaceUniforms}
         gl.uniform4fv(m.u.uGripLight, L.surfaceLight ?? NO_SURFACE_LIGHT);
         gl.uniform4fv(m.u.uHemContact, L.hemContact ?? NO_HEM_CONTACT);
       }
+      if (hasStockings) gl.uniform4fv(m.u.uStockingTension, L.stockingTension ?? NO_HEM_CONTACT);
       if (L.replace) gl.blendFunc(gl.ONE, gl.ZERO);
       gl.drawElements(gl.TRIANGLES, L.mesh.tris.length, gl.UNSIGNED_INT, 0);
       if (L.replace) gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);

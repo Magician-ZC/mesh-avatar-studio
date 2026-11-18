@@ -198,9 +198,10 @@ export async function createMeshAvatarImpl(canvas, options) {
     const mesh = buildGrid(rects[n], rig.mesh.clothCell ?? 8, alphaOf(image), image.width);
     clothMeshes.set(c.name, mesh);
     cloth.attach(c.name, mesh);
-    surfaces.attach(R.addLayer(n, image, mesh), c);
+    const layer = R.addLayer(n, image, mesh);
+    surfaces.attach(layer, c);
     if (c.material === 'stocking' && c.reach > 0) {
-      stockingFolds.set(c.name, createStockingFold(R, c.name, image, rects[n]));
+      stockingFolds.set(c.name, createStockingFold(R, c.name, image, rects[n], layer));
     }
   };
   CLOTH.filter(c => c.behind).forEach(addCloth);
@@ -220,7 +221,9 @@ export async function createMeshAvatarImpl(canvas, options) {
     const x = baseMesh.rest[i * 2], y = baseMesh.rest[i * 2 + 1];
     baseW.push(baseWeights(x, y, hairAt(x, y)));
   }
-  surfaces.attach(R.addLayer('base', imgs.base, baseMesh, { face: true }));
+  const baseLayer = R.addLayer('base', imgs.base, baseMesh, { face: true });
+  R.stockingBody = baseLayer.tex;
+  surfaces.attach(baseLayer);
   // The body behind a lifted skirt stays with its own leg, including where the legs cross.
   const bodyUnderCloth = skirtBodyLayers.map(({ part, name, owner, legs }) => {
     const image = imgs[name];
