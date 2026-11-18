@@ -588,7 +588,7 @@ export async function createMeshAvatarImpl(canvas, options) {
           deformBase(px, py, weights, P, phys, tmp);
           travel = Math.max(travel, Math.hypot(mesh.pos[i] - tmp[0], mesh.pos[i + 1] - tmp[1]));
         }
-        fade[4 + side] = -Math.min(1, Math.max(0, (travel - IMG.h * .0006) / (IMG.h * .004)));
+        fade[4 + side] = -Math.max(0, (travel - IMG.h * .0006) / (IMG.h * .004));
       });
     }
 

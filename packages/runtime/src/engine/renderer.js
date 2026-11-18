@@ -39,7 +39,7 @@ export function createRenderer(engine, rig) {
     if (any(notEqual(shade, vec3(0.0)))) {
       float change = p.x < hemX.y ? mix(shade.x, shade.y, smoothstep(hemX.x, hemX.y, p.x))
                                   : mix(shade.y, shade.z, smoothstep(hemX.y, hemX.z, p.x));
-      c *= 1.0 + change;
+      c *= 1.0 + max(-1.0, change);
     }` : '';
 
   const FS = `#version 300 es
