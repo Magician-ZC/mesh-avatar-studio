@@ -5,6 +5,7 @@ import { createRig } from './rig.js';
 import { createRenderer } from './renderer.js';
 import { createPhysics } from './physics.js';
 import { createCloth } from './cloth.js';
+import { createStockingFold } from './stocking-fold.js';
 import { createSpriteModule, eyeMood } from './sprites.js';
 import { openEyeAlpha, openEyeLayerName } from './open-eyes.js';
 import { eyePartNames, gazeShift, hasIrisLayers, irisLayerNames, irisRim, isEyeFill } from './iris-layers.js';
@@ -189,6 +190,7 @@ export async function createMeshAvatarImpl(canvas, options) {
   // garments behind the body (drawn first) and in front of it, each skinned to its cloth grid
   const cloth = new Cloth();
   const clothMeshes = new Map();
+  const stockingFolds = new Map();
   const surfaces = new SoftSurfaces(rig, new Set(Object.keys(meta.garmentUnderlayers ?? {})));
   const addCloth = c => {
     const n = `cloth_${c.name}`;
@@ -197,6 +199,9 @@ export async function createMeshAvatarImpl(canvas, options) {
     clothMeshes.set(c.name, mesh);
     cloth.attach(c.name, mesh);
     surfaces.attach(R.addLayer(n, image, mesh), c);
+    if (c.material === 'stocking' && c.reach > 0) {
+      stockingFolds.set(c.name, createStockingFold(R, c.name, image, rects[n]));
+    }
   };
   CLOTH.filter(c => c.behind).forEach(addCloth);
   // limb chains (ER4): their own layers, skinned to their two bones; behind ones before the base, the rest after the
@@ -581,6 +586,7 @@ export async function createMeshAvatarImpl(canvas, options) {
     if (CLOTH.length) { if (grabs.active) grabs.beforeCloth(); cloth.step(P, dt, phys); cloth.deform(); }
     if (limbs) { limbs.step(dt); limbs.deform(P, phys); }
     surfaces.step(dt, place);
+    for (const [name, fold] of stockingFolds) fold.update(surfaces.stockingPull(name), place);
     for (const { probes, fade } of hemContacts) {
       probes.forEach((near, side) => {
         let travel = 0;

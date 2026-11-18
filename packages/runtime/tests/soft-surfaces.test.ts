@@ -64,20 +64,30 @@ test.each(['knit', 'woven'] as const)('a %s bodice carries a chest-level pull to
   expect(uncut.offset(50, 10)).toEqual([0, 0]);
 });
 
-test('a stocking pulls across the leg, a skirt lifts from its hem, and its waistband stays attached', () => {
-  for (const material of ['stocking', 'pleat'] as const) {
-    const { model, target, frames, offset } = surface(material);
-    expect(model.hold(target, 50, 90)).toBe(true);
-    model.move(target, 0, -150, 0); frames(60);
-    const lift = -offset(50, 90)[1];
-    model.move(target, 150, 0, 0); frames(60);
-    const stretch = offset(50, 90)[0];
-    if (material === 'pleat') expect(lift).toBeGreaterThan(1.7 * stretch);
-    else expect(stretch).toBeGreaterThan(2 * lift);
-    expect(offset(50, 0)).toEqual([0, 0]);
-    model.release(target, 0, 0); frames(150);
-    expect(offset(50, 90)).toEqual([0, 0]);
-  }
+test('a stocking draws tension into a fold while its painted leg and cut edges stay in place', () => {
+  const { model, target, frames, offset } = surface('stocking');
+  expect(model.hold(target, 50, 90)).toBe(true);
+  model.move(target, 0, -150, 0); frames(60);
+  const lift = -model.stockingPull('sample')!.offset[1];
+  model.move(target, 150, 0, 0); frames(60);
+  const pull = model.stockingPull('sample')!;
+  expect(pull.centre).toEqual([50, 90]);
+  expect(pull.offset[0]).toBeGreaterThan(2 * lift);
+  for (const y of [0, 50, 90, 100]) expect(offset(50, y)).toEqual([0, 0]);
+  model.release(target, 0, 0); frames(150);
+  expect(model.stockingPull('sample')).toBeNull();
+});
+
+test('a skirt lifts from its hem and its waistband stays attached', () => {
+  const { model, target, frames, offset } = surface('pleat');
+  expect(model.hold(target, 50, 90)).toBe(true);
+  model.move(target, 0, -150, 0); frames(60);
+  const lift = -offset(50, 90)[1];
+  model.move(target, 150, 0, 0); frames(60);
+  expect(lift).toBeGreaterThan(1.7 * offset(50, 90)[0]);
+  expect(offset(50, 0)).toEqual([0, 0]);
+  model.release(target, 0, 0); frames(150);
+  expect(offset(50, 90)).toEqual([0, 0]);
   const limited = surface('pleat', false);
   limited.model.hold(limited.target, 50, 90);
   limited.model.move(limited.target, 0, -150, 0); limited.frames(60);

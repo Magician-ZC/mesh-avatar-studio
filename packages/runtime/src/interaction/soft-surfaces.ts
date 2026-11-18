@@ -126,7 +126,7 @@ class Surface {
       return fixedHem * collar * Math.max(edge * edge * panel, transmission * shoulders);
     }
     // A compact smooth surface fixes the surrounding rib cage / cloth. Pin cloth to its sewn edge.
-    const attach = this.cloth && this.cloth.material !== 'stocking'
+    const attach = this.cloth
       ? Math.min(1, seamDistance(x, y, this.cloth.waist) / (this.radius[1] * 0.42)) : 1;
     return edge * edge * attach;
   }
@@ -146,8 +146,11 @@ class Surface {
     if (!grip) return false;
     if (this.cloth) {
       this.centre = grip.rest;
-      this.patches.length = 0;
-      for (const { layer, slot } of this.meshes) this.bindPatch(layer, slot);
+      // The stocking image contains the painted leg. Only the separate fold follows the fingers.
+      if (this.cloth.material !== 'stocking') {
+        this.patches.length = 0;
+        for (const { layer, slot } of this.meshes) this.bindPatch(layer, slot);
+      }
     }
     this.grip = grip;
     return true;
@@ -162,6 +165,12 @@ class Surface {
     const c = Math.cos(this.angle), s = Math.sin(this.angle);
     this.velocity[0] += clamp(c * vx + s * vy, -4 * this.reach, 4 * this.reach) * 0.22;
     this.velocity[1] += clamp(-s * vx + c * vy, -4 * this.reach, 4 * this.reach) * 0.22;
+  }
+
+  stockingPull() {
+    const [dx, dy, z] = this.displacement;
+    if (Math.abs(dx) + Math.abs(dy) + Math.abs(z) <= .003) return null;
+    return { centre: this.centre, offset: [dx, dy] as Point, depth: z, reach: this.reach };
   }
 
   prepare(dt: number, place: (p: Point) => Point, gravity: Point) {
@@ -273,6 +282,7 @@ export class SoftSurfaces {
   hold(t: SurfaceTarget, x: number, y: number) { return this.get(t)?.hold(x, y) ?? false; }
   move(t: SurfaceTarget, x: number, y: number, z: number) { this.get(t)?.move(x, y, z); }
   release(t: SurfaceTarget, vx: number, vy: number) { this.get(t)?.release(vx, vy); }
+  stockingPull(name: string) { return this.fabrics.get(name)?.stockingPull() ?? null; }
   step(dt: number, place: (p: Point) => Point) {
     for (const s of this.chest.values()) s.prepare(dt, place, this.gravity);
     for (const s of this.fabrics.values()) s.prepare(dt, place, this.gravity);
