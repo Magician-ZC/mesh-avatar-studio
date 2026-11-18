@@ -675,6 +675,10 @@ def hand_prefill(rgba, remove, hand):
     return prefill, painted
 
 
+def has_neckline(cloth):
+    return cloth.get("material") == "knit" or (cloth.get("material") == "woven" and bool(cloth.get("neckline")))
+
+
 def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", legs=None, covered=None, notes=None, occluders=None):
     """Cut each garment into its own layer and write base_cloth.png without them.
 
@@ -720,15 +724,15 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
         if cloth.get("material"):
             outline[foreground_limbs] = 0
         masks[cloth["name"]] = outline
-    knit_front = np.zeros(shape, np.uint8)
+    bodice_front = np.zeros(shape, np.uint8)
     for cloth in rig["cloth"]:
-        if cloth.get("material") == "knit":
-            knit_front |= masks[cloth["name"]]
+        if has_neckline(cloth):
+            bodice_front |= masks[cloth["name"]]
     for cloth in rig["cloth"]:
-        if cloth.get("material") == "woven":
-            # The bound knit is the visible front between the lapels. A coarse lapel
-            # outline or its hem ring must not carry a duplicate strip of the pullover.
-            masks[cloth["name"]] &= ~knit_front
+        if cloth.get("material") == "woven" and not cloth.get("neckline"):
+            # The bound bodice is the visible front between the lapels. A coarse lapel
+            # outline or its hem ring must not carry a duplicate strip of the bodice.
+            masks[cloth["name"]] &= ~bodice_front
     front = np.zeros(shape, np.uint8)
     for cloth in rig["cloth"]:
         if not cloth.get("behind"):
@@ -744,7 +748,7 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
         mask = masks[cloth["name"]] & ~taken
         if cloth.get("behind"):
             mask &= ~front
-        if cloth.get("material") == "knit":
+        if has_neckline(cloth):
             # Shoulder seams and the waistband are attached. Only the neckline opens,
             # and the approved innerwear is already aligned to that opening.
             if covered is not None:
@@ -762,7 +766,7 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
             if cloth.get("material"):
                 keep_out |= foreground_limbs
             if cloth.get("material") == "woven":
-                keep_out |= knit_front > 0
+                keep_out |= bodice_front > 0
             region, band, fill, report = hem_band().band(rgba, mask, cloth, legs, keep_out)
             if occluders is not None:
                 fill = behind_front(rgba, region, band, fill, occluders)
@@ -794,7 +798,7 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
     images["base_cloth"] = bare
 
 
-def matte_knit_collar(sprite, source, patch, coverage, delta, margin, bare):
+def matte_collar(sprite, source, patch, coverage, delta, margin, bare):
     """Unmix the antialiased lip from the original skin so the edge stays cloth-coloured when pulled."""
     background = patch[..., :3].astype(np.float32)
     original = source[..., :3].astype(np.float32)
@@ -931,11 +935,12 @@ def build_garment_underlayers(folder, entries, rig, meta, images, store, rgba):
             data["rect"] = store_local(layer, np.asarray(preview))
             layers[name] = data
             continue
-        if cloth.get("material") == "knit" and cloth.get("neckline"):
+        neckline = cloth.get("neckline") if has_neckline(cloth) else None
+        if neckline:
             # The drawn collar includes an antialiased ink line on the skin side.
-            # Carry that line with the moving knit and continue the wearer's adjacent
+            # Carry that line with the moving collar and continue the wearer's adjacent
             # exposed skin across its old position, right up to the approved patch.
-            rim = np.asarray(cloth["neckline"])
+            rim = np.asarray(neckline)
             cols = np.arange(x, x + w)
             rim_y = np.interp(cols, rim[:, 0], rim[:, 1])
             margin = max(2, round(.014 * np.ptp(rim[:, 0])))
@@ -957,9 +962,9 @@ def build_garment_underlayers(folder, entries, rig, meta, images, store, rgba):
         if result is None:
             result = drawn.copy()
         result[y:y + h, x:x + w][coverage] = patch[coverage]
-        if cloth.get("material") == "knit" and cloth.get("neckline"):
-            matte_knit_collar(images[key], rgba[y:y + h, x:x + w], patch, coverage,
-                              delta, margin, drawn[y:y + h, x:x + w])
+        if neckline:
+            matte_collar(images[key], rgba[y:y + h, x:x + w], patch, coverage,
+                         delta, margin, drawn[y:y + h, x:x + w])
         sx, sy, sw, sh = cv2.boundingRect(coverage.astype(np.uint8))
         layer = f"under_{name}"
         rect = [x + sx, y + sy, sw, sh]

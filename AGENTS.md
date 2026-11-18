@@ -16,8 +16,8 @@ the English version takes precedence.
 - MiraMate's material interactions include cheek pulls, three-axis chest deformation, skirt lifts and local
   stocking stretch. Bind each leg and its hosiery behind the outer skirt, place any shorts at the hips,
   and keep intervening background or back panels visible. The approved build-time patches are inner clothing,
-  underwear and skin adjacent to the moving garment. For a knit top, bind the visible fabric and its neckline
-  independently of the chest and coat. Confirm the collar opens under a plain pointer drag and covers its underlayer on release. Review them on the existing generated characters.
+  underwear and skin adjacent to the moving garment. For a top or dress with a free neckline, bind the visible bodice and its trim
+  independently of the chest, skirt and jacket panels. Confirm the collar opens under a plain pointer drag and covers its underlayer on release. Review them on the existing generated characters.
 
 Use Node.js 22.17+ and Python 3.10+ with `uv`. Run:
 
