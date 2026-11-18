@@ -36,15 +36,21 @@ export function createRenderer(engine, rig) {
     if (footprint.z > 0.0 && c.a > 0.0) {
       vec2 v = p - grip.xy;
       vec2 q = vec2(dot(v, grip.zw), dot(v, vec2(-grip.w, grip.z))) / footprint.xy;
-      float strain = (1.0 - smoothstep(0.0, 1.0, dot(q, q))) * footprint.z;
+      float contact = max(0.0, 1.0 - q.x * q.x - 1.45 * q.y * q.y);
+      float strain = contact * contact * footprint.z;
       // Opening the weave transmits more of the fixed leg colour. Keep the original
       // silhouette and shading in texels for which the artwork has no painted skin.
-      vec4 leg = texture(uStockingBody, p / uStockingBodySize);
+      // Take a colour reference at the grip. Reusing the skin plate pixel by pixel
+      // would print its cropped upper edge across the middle of the thigh.
+      vec4 leg = texture(uStockingBody, grip.xy / uStockingBodySize);
+      vec4 fitted = texture(uTex, (grip.xy - uRect.xy) / uRect.zw);
       vec3 yarn = c.rgb / c.a;
       vec3 thinned = pow(yarn, vec3(0.54));
       vec3 skin = leg.rgb / max(leg.a, 0.001);
-      float paintedSkin = leg.a * smoothstep(0.03, 0.16, length(skin - yarn));
-      c.rgb = mix(c.rgb, c.a * mix(thinned, skin, 0.78 * paintedSkin), 0.78 * strain);
+      vec3 dye = skin - fitted.rgb / max(fitted.a, 0.001);
+      float paintedSkin = leg.a * fitted.a * smoothstep(0.03, 0.16, length(dye));
+      vec3 transmitted = clamp(yarn + clamp(dye, vec3(-0.32), vec3(0.38)), 0.0, 1.0);
+      c.rgb = mix(c.rgb, c.a * mix(thinned, transmitted, 0.72 * paintedSkin), 0.70 * strain);
     }` : '';
   const surfaceShading = hasSurfaceLighting ? `
     for (int i = 0; i < 3; ++i) {
