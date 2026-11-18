@@ -74,7 +74,9 @@ function paintFibres(canvas, colour, grainAt) {
       const ridge = Math.exp(-13 * (cross - .50 + .15 * along) ** 2);
       const grazing = Math.abs(cross) ** 3;
       const density = .12 + .22 * grazing + .125 * trough + .22 * along ** 3;
-      const sheen = (.18 + .82 * Math.max(0, -face)) * ridge * (.19 + .10 * along);
+      const crest = Math.exp(-65 * (cross + .40 - .12 * along) ** 2);
+      const sheen = (.18 + .82 * Math.max(0, -face)) * ridge * (.32 + .14 * along)
+        + .12 * crest * Math.max(0, face);
       const i = (y * size + x) * 4;
       for (let c = 0; c < 3; c++) image.data[i + c] = colour[c] * (1 - .18 * trough) + (255 - colour[c]) * sheen + grain;
       image.data[i + 3] = 255 * contactFade * (density + .003 * grain);
@@ -134,9 +136,11 @@ export function createStockingFold(renderer, name, image, rect, fittedLayer) {
     const length = Math.hypot(dx, dy), travel = Math.min(length, grip.reach, 1.02 * legWidth);
     if (travel < .004 * legWidth) return;
     const ax = dx / length, ay = dy / length, nx = -ay, ny = ax;
-    const strength = clamp(travel / (.56 * legWidth), 0, 1);
-    const width = legWidth * (.27 + .15 * strength), along = width * .66;
-    tension.set([x, y, ax, ay, 1.28 * width, width, strength, 0]);
+    const strength = clamp(travel / Math.min(.56 * legWidth, .82 * grip.reach), 0, 1);
+    const width = Math.min(legWidth * (.27 + .15 * strength), 1.05 * grip.reach), along = width * .66;
+    // Yarn is drawn into the fold from behind the pinch. This exposed span of stretched
+    // weave stays on the leg, while the two overlapping walls absorb light ahead of it.
+    tension.set([x - .40 * width * ax, y - .40 * width * ay, ax, ay, 1.28 * width, width, strength, 0]);
     const tipX = x + ax * travel, tipY = y + ay * travel;
     const centre = place([x, y]), acrossX = place([x + 1, y]), acrossY = place([x, y + 1]);
     const ex = [acrossX[0] - centre[0], acrossX[1] - centre[1]];
