@@ -151,7 +151,61 @@ def least_share(colour, behind):
     return np.maximum(darker, lighter).max(axis=1), near
 
 
-def cut_one(here, distance, along, parsed, sigma, line):
+def weave_behind(rgb, known, garment, visible, zone, smooth, sigma):
+    """Continue the weave with overlapping intact patches sampled on the same garment.
+    Keep the plate's lighting and choose each patch by its visible border and colour."""
+    fabric = garment & visible
+    radius = max(7, min(24, round(sigma * 0.4)))
+    size, step = 2 * radius + 1, max(4, radius // 3)
+    donors = cv2.erode(fabric.astype(np.uint8), np.ones((size, size), np.uint8),
+                       borderType=cv2.BORDER_CONSTANT, borderValue=0) > 0
+    dy, dx = np.nonzero(donors[::step, ::step])
+    dy, dx = dy * step, dx * step
+    support = pushpull(garment[..., None].astype(np.float32), known)[..., 0]
+    region = zone & (support > 0.2)
+    if not len(dx) or not region.any():
+        return smooth
+    y, x = np.nonzero(region)
+    weights = np.zeros(zone.shape, np.float32)
+    total = np.zeros_like(smooth)
+    kernel = np.maximum(0.01, np.outer(np.hanning(size), np.hanning(size))).astype(np.float32)
+    spread = max(5, radius * 1.1)
+    blur = cv2.GaussianBlur(fabric.astype(np.float32), (0, 0), spread)
+    tone = cv2.GaussianBlur(rgb.astype(np.float32) * fabric[..., None], (0, 0), spread) / np.maximum(blur[..., None], 1e-6)
+    detail = rgb.astype(np.float32) - tone
+    for cy in range(y.min(), y.max() + radius, radius):
+        for cx in range(x.min(), x.max() + radius, radius):
+            y0, y1 = max(0, cy - radius), min(zone.shape[0], cy + radius + 1)
+            x0, x1 = max(0, cx - radius), min(zone.shape[1], cx + radius + 1)
+            roi = (slice(y0, y1), slice(x0, x1))
+            if not region[roi].any():
+                continue
+            distance = (dy - cy) ** 2 + (dx - cx) ** 2
+            near = np.flatnonzero(distance < (3 * sigma + radius) ** 2)
+            if not len(near):
+                continue
+            # Compare intact two-dimensional swatches: independently copying scanlines
+            # breaks ribbing and turns the scallops of a ruffle into horizontal bands.
+            sy, sx = np.mgrid[y0:y1:step, x0:x1:step]
+            seen = fabric[sy, sx]
+            reference = np.where(seen[..., None], rgb[sy, sx], smooth[sy, sx])
+            trust = np.where(seen, 1.0, 0.12)
+            oy = dy[near, None, None] + sy - cy
+            ox = dx[near, None, None] + sx - cx
+            samples = np.where(seen[None, ..., None], rgb[oy, ox], tone[oy, ox])
+            mismatch = ((samples - reference) ** 2).mean(axis=3)
+            cost = (mismatch * trust).sum(axis=(1, 2)) / trust.sum() + 0.015 * distance[near]
+            chosen = near[np.argmin(cost)]
+            tile = detail[dy[chosen] + y0 - cy:dy[chosen] + y1 - cy, dx[chosen] + x0 - cx:dx[chosen] + x1 - cx]
+            weight = kernel[y0 - cy + radius:y1 - cy + radius, x0 - cx + radius:x1 - cx + radius]
+            total[roi] += tile * weight[..., None]
+            weights[roi] += weight
+    gain = smoothstep(0.2, 0.85, support[region]) / np.maximum(weights[region], 1e-6)
+    smooth[region] = np.clip(smooth[region] + total[region] * gain[:, None], 0, 255)
+    return smooth
+
+
+def cut_one(here, distance, along, parsed, sigma, line, garment=None):
     """(lock RGBA uint8, plate RGBA uint8, region, unsure) over one strand's window, or None when too little hair.
 
     here: the drawn base (RGBA uint8); distance, along: corridor(); parsed: the hair mask (bool); line: the strand's line
@@ -249,6 +303,8 @@ def cut_one(here, distance, along, parsed, sigma, line):
     figure = cv2.inpaint(np.ascontiguousarray(alpha), zone.astype(np.uint8) * 255, 9, cv2.INPAINT_TELEA) >= 128
     figure = np.where(zone, figure, alpha >= 128)
     behind = np.clip(pushpull(rgb.astype(np.float32), known), 0, 255)
+    if garment is not None:
+        behind = weave_behind(rgb, known, garment, solid & ~zone & ~parsed, zone & figure, behind, sigma)
     hair_colour = pushpull(rgb.astype(np.float32), body if body.sum() >= PALETTE else lock & solid)
     # premultiplied (0..255): the drawing, what lies behind (opaque on the figure, nothing off it), the plate, the lock
     a = alpha.astype(np.float32)[..., None] / 255
@@ -304,7 +360,7 @@ def straight(premultiplied):
     return np.clip(np.rint(np.concatenate([colour, a], axis=2)), 0, 255).astype(np.uint8)
 
 
-def cut(drawn, hair, rig):
+def cut(drawn, hair, rig, garment=None):
     """The strand layers of the strands with a reach: ({name: (image, rect)}, {strand name: {lock, under}}, [notes]).
 
     drawn: the base the runtime draws (RGBA, source size); hair: 8-bit hair mask (source size, white is hair)."""
@@ -324,7 +380,8 @@ def cut(drawn, hair, rig):
         line = np.zeros(distance.shape, np.uint8)
         start = max(1, int(np.ceil(0.1 * (len(nodes) - 1))))
         cv2.polylines(line, [np.rint(np.asarray(nodes[start - 1 :]) - (x0, y0)).astype(np.int32)], False, 1, 3)
-        result = cut_one(drawn[window], distance, along, hair[window] >= 128, sigma, line)
+        result = cut_one(drawn[window], distance, along, hair[window] >= 128, sigma, line,
+                         garment[window] if garment is not None else None)
         if result is None:
             notes.append(f"{strand['name']}: too little hair along the strand")
             continue

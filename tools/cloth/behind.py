@@ -190,14 +190,15 @@ def shift_for(rgb, part, ring, source, step, drift=None):
     return None if best is None else best[1]
 
 
-def copy_whole(rgb, alpha, part, source, step):
+def copy_whole(rgb, alpha, part, source, step, align_tiers=False):
     """Copy the garment over a wide part of the hole by one shift, with what differs along its ring spread smoothly
     across it. Returns (colours for the part's pixels, which of them were copied, the shift), or None."""
     figure = alpha >= 128
     ring = cv2.dilate(part.astype(np.uint8), np.ones((2 * RING + 1, 2 * RING + 1), np.uint8)) > 0
     ring &= ~part & source & figure
     ys = np.flatnonzero(part.any(axis=1))
-    shift = shift_for(rgb, part, ring, source, step, DRIFT * (ys.max() - ys.min() + 1) + RING)
+    drift = 2 * RING if align_tiers else DRIFT * (ys.max() - ys.min() + 1) + RING
+    shift = shift_for(rgb, part, ring, source, step, drift)
     if shift is None:
         shift = shift_for(rgb, part, ring, source, step)
     if shift is None:
@@ -246,7 +247,68 @@ def vote(rgb, target, sy, sx, ty, tx, radius):
     return np.where(count[:, None] > 0, total / np.maximum(count, 1)[:, None], rgb[ty, tx]).astype(np.uint8)
 
 
-def fill(rgba, hole, source):
+def continue_seams(rgba, filled, hole, garment):
+    """Match both the colour and direction of the folds entering a pasted panel.
+    The hem mask can end at a handle; the opaque cloth right against the cut still supplies its colour."""
+    yy, xx = np.nonzero(hole)
+    width = min(np.ptp(xx) + 1, np.ptp(yy) + 1)
+    radius = max(PATCH, min(100, round(0.19 * width)))
+    h, w = hole.shape
+    window = (slice(max(0, yy.min() - radius), min(h, yy.max() + radius + 1)),
+              slice(max(0, xx.min() - radius), min(w, xx.max() + radius + 1)))
+    target = hole[window]
+    src, out = rgba[window], filled[window]
+    solid = (src[..., 3] >= SOLID) & ~target
+    if not solid.any():
+        return
+    distance, labels = cv2.distanceTransformWithLabels((~solid).astype(np.uint8), cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL)
+    sy, sx = np.nonzero(solid)
+    inner = target & (out[..., 3] > 0)
+    rim = inner & (distance < 4)
+    delta = np.zeros((*target.shape, 3), np.float32)
+    index = labels[rim] - 1
+    delta[rim] = src[sy[index], sx[index], :3].astype(np.float32) - out[rim, :3]
+    # Correct illumination over a wide neighbourhood and edge detail close to the rim.
+    correction = np.zeros_like(delta)
+    for spread in (radius, radius * 0.4, radius * 0.15, 3):
+        weight = cv2.GaussianBlur(rim.astype(np.float32), (0, 0), spread)
+        change = cv2.GaussianBlur(delta, (0, 0), spread) / np.maximum(weight[..., None], 1e-6)
+        mix = np.exp(-0.5 * (distance / spread) ** 2)[..., None]
+        correction += (change - correction) * mix
+    matched = np.clip(out[..., :3] + correction, 0, 255)
+
+    # A flared garment's long folds run obliquely into the hole from above and below.
+    # Trace them in the direction measured on the garment beside the accessory.
+    grey = cv2.GaussianBlur(cv2.cvtColor(src[..., :3], cv2.COLOR_RGB2GRAY).astype(np.float32), (0, 0), 6)
+    gx = cv2.Sobel(grey, -1, 1, 0)
+    gy = cv2.Sobel(grey, -1, 0, 1)
+    sample = solid & garment[window] & (np.abs(gx) > 2 * np.abs(gy))
+    slope = np.clip(-np.sum(gx[sample] * gy[sample]) / max(1, np.sum(gx[sample] ** 2)), -0.5, 0.5)
+    y, x = np.indices(target.shape)
+    columns = np.rint(x - slope * y).astype(np.int32)
+    columns -= columns.min()
+    visible = np.zeros((len(y), columns.max() + 1), bool)
+    known = solid & (cv2.distanceTransform((~inner).astype(np.uint8), cv2.DIST_L2, 5) > 3)
+    visible[y, columns] = known
+    rows = np.arange(len(y))[:, None]
+    ends = (np.maximum.accumulate(np.where(visible, rows, -2 * h), axis=0),
+            np.minimum.accumulate(np.where(visible, rows, 2 * h)[::-1], axis=0)[::-1])
+    total, weight = np.zeros_like(delta), np.zeros(target.shape, np.float32)
+    for sign, edge in zip((-1, 1), ends):
+        donor_y = (edge[y, columns] + sign * 6).astype(np.float32)
+        donor_x = (x + slope * (donor_y - y)).astype(np.float32)
+        length = np.abs(donor_y - y)
+        share = np.exp(-(length / radius) ** 2) * np.minimum(1, (distance + 15) / (length + 1)) ** 2
+        share *= cv2.remap(known.astype(np.uint8), donor_x, donor_y, cv2.INTER_NEAREST)
+        total += cv2.remap(src[..., :3], donor_x, donor_y, cv2.INTER_LINEAR) * share[..., None]
+        weight += share
+    weight = cv2.GaussianBlur(weight, (0, 0), 2)
+    folds = cv2.GaussianBlur(total, (0, 0), 2) / np.maximum(weight[..., None], 1e-6)
+    mix = np.minimum(weight, 1) * np.minimum(distance / 10, 1)
+    out[inner, :3] = np.rint(matched[inner] + (folds[inner] - matched[inner]) * mix[inner, None]).astype(np.uint8)
+
+
+def fill(rgba, hole, source, align_tiers=False):
     """The garment behind `hole` (bool): RGBA for the whole image, the picture's own pixels outside the hole. `source`
     (bool) is where the garment's patches may come from (opaque, outside the hole)."""
     out = rgba.copy()
@@ -255,6 +317,10 @@ def fill(rgba, hole, source):
     h, w = hole.shape
     ys, xs = np.nonzero(hole)
     pad = SEARCH + PATCH
+    if align_tiers:
+        # The donor must fit the wider backing and match the tier beside the bag.
+        # A narrow search forces the copy down the skirt to the next row of ruffles.
+        pad = max(pad, int(np.ptp(xs)) + SEARCH // 2)
     y0, y1, x0, x1 = max(0, ys.min() - pad), min(h, ys.max() + pad + 1), max(0, xs.min() - pad), min(w, xs.max() + pad + 1)
     window = (slice(y0, y1), slice(x0, x1))
     part, here, region = hole[window], rgba[window], out[window]
@@ -286,7 +352,7 @@ def fill(rgba, hole, source):
     rest = behind.copy()
     for i in np.unique(parts[wide]):
         piece = parts == i
-        whole = copy_whole(rgb, here[..., 3], piece, source, max(2, step))
+        whole = copy_whole(rgb, here[..., 3], piece, source, max(2, step), align_tiers)
         if whole is None:
             continue
         colours, copied, _ = whole

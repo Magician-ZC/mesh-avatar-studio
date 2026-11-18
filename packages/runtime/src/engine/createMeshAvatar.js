@@ -16,6 +16,7 @@ import { MOTIONS, IDLE_MOTIONS } from './motions.js';
 import { clientToImage, imageToClient } from '../interaction/coordinates.ts';
 import { createImpulse } from '../interaction/impulse.ts';
 import { CHEEK_SIDES, CheekPull, parseCheeks } from '../interaction/cheek.ts';
+import { SoftSurfaces } from '../interaction/soft-surfaces.ts';
 import { createGrabs } from '../interaction/grab.ts';
 import { createLimbs } from '../limbs/runtime.ts';
 
@@ -126,9 +127,21 @@ export async function createMeshAvatarImpl(canvas, options) {
   const { createSprites } = createSpriteModule(engine, rig);
 
   // with garments the base drawing is the one without them (base.png keeps them for older runtimes)
+  const garmentBase = meta.garmentBase;
+  const stockingTextures = Object.assign({}, ...Object.values(meta.garmentUnderlayers ?? {}).map(entry => entry.stockings ?? {}));
+  const skirtBodyLayers = Object.entries(meta.garmentUnderlayers ?? {}).flatMap(([owner, entry]) => [
+    ...Object.entries(entry.legs ?? {}), ...(entry.shorts ? [['pelvis', entry.shorts]] : []),
+    ...(entry.contact ? [['contact', entry.contact]] : []),
+  ].map(([part, name]) => ({ part, name, owner, legs: entry.legs })));
   const baseName = CLOTH.length ? 'base_cloth' : 'base';
   // with limb chains (ER4) the base is the bare one, without the limbs (layers.json "bare"; base.png keeps them)
   const LIMBS = rig.limbs ?? [];
+  const coveredSleeves = LIMBS.filter(l => meta.layers?.[`sleeve_${l.name}`] && meta.layers?.[`sleeve_cover_${l.name}`]);
+  const accessoryPlates = TASSELS.flatMap((t, index) => {
+    const name = `accessory_under_${t.name}`;
+    const garment = CLOTH.find(c => c.name === meta.accessoryBacks?.[t.name]);
+    return garment && meta.layers?.[name] ? [{ name, index, garment }] : [];
+  });
   const bareName = LIMBS.length && typeof meta.bare === 'string' ? meta.bare : null;
   // iris layers (see iris-layers.js): an eye with both is drawn from them, not from its eye ball
   const irisEyes = await Promise.all([0, 1].map(async i => {
@@ -141,7 +154,11 @@ export async function createMeshAvatarImpl(canvas, options) {
       return false;
     }
   }));
-  const names = [baseName, ...(bareName ? [bareName] : []), ...(rig.hand ? ['hand'] : []), ...TASSELS.map(t => t.name), ...CLOTH.map(c => `cloth_${c.name}`), ...LIMBS.map(l => `limb_${l.name}`), ...[0, 1].flatMap(i => eyePartNames(irisEyes[i]).map(p => `eye${i}_${p}`)), 'hairmask'];
+  const names = [baseName, ...(garmentBase ? [garmentBase] : []), ...(bareName ? [bareName] : []), ...(rig.hand ? ['hand'] : []), ...TASSELS.map(t => t.name), ...CLOTH.map(c => `cloth_${c.name}`), ...LIMBS.map(l => `limb_${l.name}`), ...[0, 1].flatMap(i => eyePartNames(irisEyes[i]).map(p => `eye${i}_${p}`)), 'hairmask'];
+  for (const { name } of coveredSleeves) names.push(`sleeve_${name}`, `sleeve_cover_${name}`);
+  for (const { name } of accessoryPlates) names.push(name);
+  for (const { name } of skirtBodyLayers) names.push(name);
+  names.push(...Object.values(stockingTextures));
   const imgs = Object.fromEntries(await Promise.all(names.map(async n => [n, await loadImage(asset(`${n}.png`, meta.build))])));
   if (CLOTH.length) imgs.base = imgs.base_cloth;
   // strand layers (tools/hair/strands.py, layers.json "strands"): for a strand with a reach, its lock and the base filled
@@ -158,6 +175,7 @@ export async function createMeshAvatarImpl(canvas, options) {
     }
   }))).filter(Boolean);
   if (bareName) imgs.base = imgs[bareName];
+  if (garmentBase) imgs.base = imgs[garmentBase];
   const hairMask = channelOf(imgs.hairmask, 0);
   const hairAt = (x, y) => hairMask[Math.min(IMG.h - 1, Math.max(0, Math.round(y))) * IMG.w + Math.min(IMG.w - 1, Math.max(0, Math.round(x)))] / 255;
 
@@ -170,23 +188,26 @@ export async function createMeshAvatarImpl(canvas, options) {
   // base layer, denser where hair strands bend and the face parts shift
   // garments behind the body (drawn first) and in front of it, each skinned to its cloth grid
   const cloth = new Cloth();
+  const clothMeshes = new Map();
+  const surfaces = new SoftSurfaces(rig, new Set(Object.keys(meta.garmentUnderlayers ?? {})));
   const addCloth = c => {
     const n = `cloth_${c.name}`;
-    const mesh = buildGrid(rects[n], rig.mesh.clothCell ?? 8, alphaOf(imgs[n]), imgs[n].width);
+    const image = imgs[stockingTextures[c.name] ?? n];
+    const mesh = buildGrid(rects[n], rig.mesh.clothCell ?? 8, alphaOf(image), image.width);
+    clothMeshes.set(c.name, mesh);
     cloth.attach(c.name, mesh);
-    R.addLayer(n, imgs[n], mesh);
+    surfaces.attach(R.addLayer(n, image, mesh), c);
   };
   CLOTH.filter(c => c.behind).forEach(addCloth);
   // limb chains (ER4): their own layers, skinned to their two bones; behind ones before the base, the rest after the
   // garments and overlays
   const limbs = createLimbs(rig, engine);
-  const addLimb = l => {
-    const n = `limb_${l.name}`;
+  const addLimb = (l, n = `limb_${l.name}`) => {
     const mesh = buildGrid(rects[n], rig.mesh.limbCell ?? rig.mesh.baseCell, alphaOf(imgs[n]), imgs[n].width);
     limbs.attach(l.name, mesh);
     R.addLayer(n, imgs[n], mesh);
   };
-  LIMBS.filter(l => l.behind).forEach(addLimb);
+  LIMBS.filter(l => l.behind).forEach(l => addLimb(l));
 
   const baseMesh = buildGrid(rects.base, rig.mesh.baseCell, alphaOf(imgs.base), imgs.base.width, rig.mesh.fine);
   const baseW = [];
@@ -194,7 +215,19 @@ export async function createMeshAvatarImpl(canvas, options) {
     const x = baseMesh.rest[i * 2], y = baseMesh.rest[i * 2 + 1];
     baseW.push(baseWeights(x, y, hairAt(x, y)));
   }
-  R.addLayer('base', imgs.base, baseMesh, { face: true });
+  surfaces.attach(R.addLayer('base', imgs.base, baseMesh, { face: true }));
+  // The body behind a lifted skirt stays with its own leg, including where the legs cross.
+  const bodyUnderCloth = skirtBodyLayers.map(({ part, name, owner, legs }) => {
+    const image = imgs[name];
+    const mesh = buildGrid(rects[name], rig.mesh.baseCell, alphaOf(image), image.width);
+    const W = Array.from({ length: mesh.rest.length / 2 }, (_, i) => {
+      const weights = baseWeights(mesh.rest[i * 2], mesh.rest[i * 2 + 1], 0);
+      if (weights.legs && (part === 'left' || part === 'right')) weights.legs.right = part === 'right' ? 1 : 0;
+      return weights;
+    });
+    const layer = part === 'contact' ? null : R.addLayer(name, image, mesh);
+    return { name, mesh, W, layer, part, owner, legs };
+  });
 
   // Strand layers, drawn only while their strand is held (or springs back after it): the plate takes the place of the
   // base round the lock, still where the base bends with the strand, and the lock goes over it as one piece across its
@@ -312,7 +345,50 @@ export async function createMeshAvatarImpl(canvas, options) {
   const hairFront = head?.hair ? headLayer(HAIR_FRONT, head.hair, true) : null;
   if (hairFront) hairFront.layer = R.addLayer(HAIR_FRONT, head.hair, hairFront.mesh);
 
-  CLOTH.filter(c => !c.behind).forEach(addCloth);
+  const contactLayers = bodyUnderCloth.filter(item => item.part === 'contact');
+  for (const garment of CLOTH.filter(c => !c.behind)) {
+    const contact = contactLayers.find(item => item.owner === garment.name);
+    if (contact) contact.layer = R.addLayer(contact.name, imgs[contact.name], contact.mesh);
+    addCloth(garment);
+  }
+  // A contact shadow stays on the leg until the hem lifts away on that side.
+  function contactProbe(mesh, cx, cy) {
+    let nearest = 0, distance = Infinity;
+    for (let i = 0; i < mesh.rest.length; i += 2) {
+      const d = (mesh.rest[i] - cx) ** 2 + (mesh.rest[i + 1] - cy) ** 2;
+      if (d < distance) { nearest = i; distance = d; }
+    }
+    const px = mesh.rest[nearest], py = mesh.rest[nearest + 1];
+    return { mesh, i: nearest, px, py, weights: baseWeights(px, py, 0) };
+  }
+  const hemContacts = contactLayers.filter(item => item.layer).map(item => {
+    const [, y, , h] = item.mesh.rect;
+    const [left, right] = Object.values(item.legs).map(name => {
+      const [x, , w] = rects[name];
+      return x + w / 2;
+    }).sort((a, b) => a - b);
+    const centre = (left + right) * .5;
+    const probes = [left, centre, right].map(cx => {
+      const cy = y + h * .25;
+      const near = [contactProbe(clothMeshes.get(item.owner), cx, cy)];
+      for (const c of CLOTH.filter(c => c.material === 'stocking')) {
+        const [ox, oy, ow, oh] = rects[`cloth_${c.name}`];
+        if (cx >= ox && cx <= ox + ow && cy >= oy && cy <= oy + oh) near.push(contactProbe(clothMeshes.get(c.name), cx, cy));
+      }
+      return near;
+    });
+    const fade = new Float32Array([left, centre, right, 0, 0, 0, 0, 0]);
+    item.layer.hemContact = fade;
+    return { probes, fade };
+  });
+  const accessoryBacks = accessoryPlates.map(({ name, index, garment }) => {
+    const mesh = buildGrid(rects[name], rig.mesh.baseCell, alphaOf(imgs[name]), imgs[name].width);
+    const layer = R.addLayer(name, imgs[name], mesh);
+    cloth.attach(garment.name, mesh);
+    surfaces.attach(layer, garment);
+    layer.visible = false;
+    return { layer, index };
+  });
 
   // optional overlay layers (glasses and other accessories) drawn above the eye / mouth sprites
   let overlays = null;
@@ -326,7 +402,16 @@ export async function createMeshAvatarImpl(canvas, options) {
     if (options.assets?.['overlays/overlays.json']) console.warn('overlay layers not loaded:', err);
   }
 
-  LIMBS.filter(l => !l.behind).forEach(addLimb);
+  LIMBS.filter(l => !l.behind).forEach(l => addLimb(l));
+  const sleeveCovers = coveredSleeves.map(l => {
+    addLimb(l, `sleeve_${l.name}`);
+    const name = `sleeve_cover_${l.name}`;
+    const mesh = buildGrid(rects[name], rig.mesh.limbCell ?? rig.mesh.baseCell, alphaOf(imgs[name]), imgs[name].width);
+    const W = Array.from({ length: mesh.rest.length / 2 }, (_, k) => baseWeights(mesh.rest[2 * k], mesh.rest[2 * k + 1], 0));
+    R.addLayer(name, imgs[name], mesh);
+    return { mesh, W };
+  });
+  const attachedLayers = [faceSkin, hairFront, ...sleeveCovers, ...bodyUnderCloth].filter(Boolean);
 
   const tassels = TASSELS.map(t => {
     const mesh = buildGrid(rects[t.name], rig.mesh.tasselCell, alphaOf(imgs[t.name]), imgs[t.name].width);
@@ -362,7 +447,7 @@ export async function createMeshAvatarImpl(canvas, options) {
   };
   // sustained grabs (../interaction/grab.ts): nothing runs until something is grabbed
   const grabs = createGrabs({
-    rig, physics, cheeks, cheekFrame, place,
+    rig, physics, cheeks, cheekFrame, place, surfaces,
     garment: name => cloth.garment(name),
     limbs: limbs ? { chains: limbs.chains, values: (name, P) => limbs.values(name, P) } : null,
     parameters: () => lastParameters,
@@ -457,8 +542,13 @@ export async function createMeshAvatarImpl(canvas, options) {
         }
       }
     }
-    for (const item of [faceSkin, hairFront]) {
-      if (!item) continue;
+    for (const { layer, index } of accessoryBacks) {
+      const ch = physics.chains[index];
+      const swing = Math.abs(ch.L1 * Math.sin(ch.phi[0]) + ch.L2 * Math.sin(ch.phi[1]));
+      layer.alpha = Math.min(1, swing / 24);
+      layer.visible = swing > 0.05;
+    }
+    for (const item of attachedLayers) {
       const r = item.mesh.rest, o = item.mesh.pos;
       for (let k = 0; k < item.W.length; k++) {
         deformBase(r[k * 2], r[k * 2 + 1], item.W[k], P, phys, tmp);
@@ -490,6 +580,17 @@ export async function createMeshAvatarImpl(canvas, options) {
     physics.chains.forEach((ch, k) => deformTassel(ch, tassels[k].mesh));
     if (CLOTH.length) { if (grabs.active) grabs.beforeCloth(); cloth.step(P, dt, phys); cloth.deform(); }
     if (limbs) { limbs.step(dt); limbs.deform(P, phys); }
+    surfaces.step(dt, place);
+    for (const { probes, fade } of hemContacts) {
+      probes.forEach((near, side) => {
+        let travel = 0;
+        for (const { mesh, i, px, py, weights } of near) {
+          deformBase(px, py, weights, P, phys, tmp);
+          travel = Math.max(travel, Math.hypot(mesh.pos[i] - tmp[0], mesh.pos[i + 1] - tmp[1]));
+        }
+        fade[4 + side] = -Math.min(1, Math.max(0, (travel - IMG.h * .0006) / (IMG.h * .004)));
+      });
+    }
 
     R.draw({
       angleX: P.angleX, angleY: P.angleY, angleZ: P.angleZ,

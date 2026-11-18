@@ -87,6 +87,8 @@ export interface MeshAvatar {
    * - `cloth`: the garment's hem at `at` (0–1 along it; nearest the press when omitted) held towards the pointer, never
    *   beyond `cloth[].reach` and the garment's own hem travel (`cloth[].max`) and never lifted. Garments without a
    *   reach are not held (null).
+   * - `chest`: one bound side of the torso, with lateral and vertical motion, depth and inertia.
+   * - `fabric`: a point on a material-bound garment, with local strain relative to the sewn edge.
    * - `limb`: the limb chain swings (and bends, held below its middle joint) towards the pointer, within its limits.
    * - `accessory`: a hanging tassel (`rig.accessories`) points from its knot towards the pointer.
    * WebGL runtime only.
@@ -95,7 +97,7 @@ export interface MeshAvatar {
   /** Whether `grab(target, ...)` would hold something on this avatar. WebGL runtime only. */
   canGrab(target: GrabTarget): boolean;
   /**
-   * Move a held part: the pointer's offset from the press in source pixels and, for cheeks, a depth from -1 to 1
+   * Move a held part: the pointer's offset from the press in source pixels and, for cheeks, chest or fabric, a depth from -1 to 1
    * (towards the camera > 0; other parts ignore it). Holding still keeps the shape. Unknown handles are ignored.
    */
   moveGrab(handle: number, dx: number, dy: number, depth?: number): void;

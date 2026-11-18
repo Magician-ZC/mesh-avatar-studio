@@ -21,7 +21,10 @@ import { CLOTH_FALLOFF, IMPULSE_LIMITS } from './limits.ts';
 import { hemPositions, type GarmentState, type ImpulseTarget } from './impulse.ts';
 import type { CheekPull, CheekSide, CheekFrame } from './cheek.ts';
 
+import type { SoftSurfaces, SurfaceTarget } from './soft-surfaces';
+
 export type GrabTarget =
+  | SurfaceTarget
   | { kind: 'cheek'; side: CheekSide }
   | { kind: 'strand'; name: string }
   | { kind: 'cloth'; name: string; at?: number }
@@ -49,6 +52,7 @@ export interface GrabParts {
   garment(name: string): HeldGarment | null;
   limbs: { chains: LimbChainLike[]; values(name: string, P: Record<string, number>): { swing: number; bend: number } | null } | null;
   cheeks: CheekPull | null;
+  surfaces?: SoftSurfaces;
   /** Where a cheek is drawn now (see CheekPull.hold). */
   cheekFrame(side: CheekSide): CheekFrame | null;
   /** Where a rest-space point of the base is drawn with the latest parameters. */
@@ -111,7 +115,7 @@ export function createGrabs(parts: GrabParts) {
   const settling = new Map<string, { swing: number; bend: number; vs: number; vb: number }>();
   let next = 1;
 
-  const keyOf = (t: GrabTarget) => t.kind === 'cheek' ? `cheek:${t.side}` : `${t.kind}:${t.name}`;
+  const keyOf = (t: GrabTarget) => t.kind === 'cheek' || t.kind === 'chest' ? `${t.kind}:${t.side}` : `${t.kind}:${t.name}`;
   // the strands of that name a grab can hold: those with a reach
   const strandIndices = (name: string) => (rig.strands ?? []).flatMap((s, i) => s.name === name && s.reach! > 0 ? [i] : []);
   /** How far the named garment's hem may be held from where it hangs (its reach within its travel), or 0. */
@@ -123,8 +127,8 @@ export function createGrabs(parts: GrabParts) {
   function valid(target: unknown): target is GrabTarget {
     if (!target || typeof target !== 'object') return false;
     const t = target as Record<string, unknown>;
-    if (t.kind === 'cheek') return t.side === 'left' || t.side === 'right';
-    if (!['strand', 'cloth', 'limb', 'accessory'].includes(t.kind as string) || typeof t.name !== 'string') return false;
+    if (t.kind === 'cheek' || t.kind === 'chest') return t.side === 'left' || t.side === 'right';
+    if (!['strand', 'cloth', 'limb', 'accessory', 'fabric'].includes(t.kind as string) || typeof t.name !== 'string') return false;
     return t.kind !== 'cloth' || t.at === undefined || (typeof t.at === 'number' && Number.isFinite(t.at));
   }
 
@@ -132,6 +136,7 @@ export function createGrabs(parts: GrabParts) {
   function can(target: unknown): boolean {
     if (!valid(target)) return false;
     switch (target.kind) {
+      case 'chest': case 'fabric': return !!parts.surfaces?.can(target);
       case 'cheek': return !!parts.cheeks?.has(target.side);
       case 'strand': return strandIndices(target.name).some(i => physics.strands[i]);
       case 'cloth': { const g = parts.garment(target.name); return !!g && hemReach(target.name, g) > 0; }
@@ -143,7 +148,9 @@ export function createGrabs(parts: GrabParts) {
   function grab(target: unknown, x: number, y: number): number | null {
     if (!valid(target) || !finite(x, y) || !can(target)) return null;
     const entry: Held = { key: keyOf(target), target, press: [x, y], offset: [0, 0], depth: 0 };
-    if (target.kind === 'cheek') {
+    if (target.kind === 'chest' || target.kind === 'fabric') {
+      if (!parts.surfaces!.hold(target, x, y)) return null;
+    } else if (target.kind === 'cheek') {
       const frame = parts.cheekFrame(target.side);
       if (!frame || !parts.cheeks!.hold(target.side, x, y, frame)) return null;
     } else if (target.kind === 'strand') {
@@ -202,6 +209,7 @@ export function createGrabs(parts: GrabParts) {
     if (!entry || !finite(dx, dy)) return;
     entry.offset = [dx, dy];
     entry.depth = Number.isFinite(depth) ? clamp(depth, -1, 1) : 0;
+    if (entry.target.kind === 'chest' || entry.target.kind === 'fabric') parts.surfaces!.move(entry.target, dx, dy, entry.depth);
     if (entry.target.kind === 'cheek') parts.cheeks!.move(entry.target.side, dx, dy, entry.depth);
   }
 
@@ -211,7 +219,9 @@ export function createGrabs(parts: GrabParts) {
     held.delete(handle);
     const v: Point = [Number.isFinite(vx) ? vx : 0, Number.isFinite(vy) ? vy : 0];
     const t = entry.target;
-    if (t.kind === 'cheek') {
+    if (t.kind === 'chest' || t.kind === 'fabric') {
+      parts.surfaces!.release(t, v[0], v[1]);
+    } else if (t.kind === 'cheek') {
       parts.cheeks!.release(t.side, v[0], v[1], parts.cheekFrame(t.side)?.angle ?? 0);
     } else if (t.kind === 'strand') {
       parts.impulse({ kind: 'strand', name: t.name }, v[0], v[1]);

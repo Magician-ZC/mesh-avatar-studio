@@ -17,6 +17,9 @@ built/
   cloth_<name>.png              garment cutout for each rig.cloth entry
   base_bare.png                required only for nonempty rig.limbs; the runtime base without the limbs
   limb_<name>.png              limb cutout for each rig.limbs entry
+  sleeve_<name>.png            sleeve section behind an overlapping bag, skinned with the arm
+  sleeve_cover_<name>.png      original overlapping foreground, attached to the body
+  accessory_under_<name>.png   surrounding garment texture blended in as the accessory swings away
   hairmask.png                 full-size hair mask, read from the red channel
   <name>.png                   one image for every entry in layers.json.layers
   sprites/                     optional drawn eye and mouth variants
@@ -141,6 +144,9 @@ when they are invalid. It ignores unknown keys, including those inside `studio`.
 | `cheeks` | Optional (`build-layers.py --cheek-pull`), only together with the `cheek_left` / `cheek_right` layers of the sides it lists. `{ "left": { "edge", "reach", "travel" }, "right": { ... } }`, either side optional: `edge` is the face's visible outer contour on that side of the image, top to bottom (at least 3 `[x, y]` points, no point repeated), `reach` how far into the face a pull reaches at each edge point (px, positive, one per point; it stops short of the eyes, the nose, the mouth and the chin) and `travel` the largest pull of the contour (px, positive). Optional `free`: how much of the pull each edge point takes (0–1, one per point; 1 when absent), less where hair lies over the contour or, in front of the face, beside it, so the cheek neither comes out from under that hair nor passes under it; it eases back in from such points. Runtimes that know it can pull that cheek (`grab({ kind: 'cheek', side })`); without it, or in older runtimes, the avatar draws exactly as before. |
 | `strands` | Optional (`build-layers.py --strand-layers`), only for strands with a `reach`. `{ "<strand name>": { "lock", "under", "unsure" } }`: the names of the strand's two layers and the share (0–1) of the lock's outline that borders the background, where the drawing does not tell how far the figure goes on behind it. A runtime that knows them draws both only while that strand is held and springs back. |
 | `bare` | Optional. Name of the full-size base without the limb chains (`base_bare`); required when `rig.limbs` is nonempty. Runtimes that know limbs draw it instead of `base` (or `base_cloth`) and the `limb_<name>` layers over or under it; older runtimes ignore it and draw `base`, which keeps the limbs. |
+| `garmentBase` | Optional full-size body after applying garment underlayers and clearing the space revealed by a lifted skirt. |
+| `garmentUnderlayers` | Optional object keyed by garment name. Each entry has a material `kind`, a `layer` and its source `rect`. A skirt with `source: "visible_legs"` also names its `clear` mask and its `legs.left` and `legs.right` sprites. The base keeps any observed coat `back`. The runtime draws the two legs, any approved `shorts`, and the original hem's `contact` shadow beneath the skirt. Each side's shadow fades when that part of the hem moves away. Optional `stockings` maps a fitted stocking's garment name to its matching unshadowed texture; its mesh and original texture keep their source rect. |
+| `accessoryBacks` | Optional map from an accessory name to the garment behind it. Its `accessory_under_<name>` patch moves with that garment and blends into the drawing as the accessory swings away. |
 
 Rectangle origins are non-negative integers; width and height are positive integers.
 Rectangles lie inside the source image. Each corresponding PNG is cropped to its

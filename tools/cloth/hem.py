@@ -40,6 +40,31 @@ def depth_of(travel):
     return float(travel) * BAND_K + BAND_PAD
 
 
+def traced_hem(rgba, polygon, blocked):
+    """Follow the painted hem when the fitted outline stops just inside the actual skirt.
+    Each test column must still resemble the skirt above and differ from the leg/background below."""
+    h, w = polygon.shape
+    margin = max(6, min(32, round(h * 0.015)))
+    grown = polygon.copy()
+    pixels = rgba.astype(np.int16)
+    for x in np.flatnonzero(polygon.any(0)):
+        end = h - 1 - np.argmax(polygon[::-1, x])
+        stop = min(h, end + margin + 1)
+        if stop >= h or stop <= end + 2:
+            continue
+        swatch = pixels[max(0, end - margin):end + 1:2, x]
+        outside = pixels[stop:min(h, stop + 6), x]
+        candidates = pixels[end + 1:stop, x]
+        fabric = np.abs(candidates[:, None] - swatch).max(2).min(1)
+        next_surface = np.abs(candidates[:, None] - outside).max(2).min(1)
+        belongs = (fabric < 40) & (fabric + 12 < next_surface) & (candidates[:, 3] > 127)
+        rejected = np.flatnonzero(~belongs | blocked[end + 1:stop, x])
+        length = int(rejected[0]) if len(rejected) else len(belongs)
+        if length:
+            grown[end + 1:end + 1 + length, x] = True
+    return grown
+
+
 def band(rgba, polygon, garment, legs=None, keep_out=None):
     """The hem band of one garment.
 
@@ -63,7 +88,11 @@ def band(rgba, polygon, garment, legs=None, keep_out=None):
     reach = depth_at_hem * np.clip((ys - waist) / max(lowest - waist, 1.0), 0, 1)  # band depth per row
     reach = np.broadcast_to(reach, (h, w))
 
-    grown = cv2.dilate(polygon.astype(np.uint8), np.ones((2 * RING + 1, 2 * RING + 1), np.uint8)) > 0
+    # A material-bound polygon closely traces its visible drawing. Capture its centered ink stroke
+    # while leaving the neighboring tights or sweater in place beyond that stroke.
+    edge = max(2, min(RING, round(w * 0.004))) if garment.get("material") else RING
+    traced = traced_hem(rgba, polygon, keep_out) if garment.get("material") == "pleat" else polygon
+    grown = cv2.dilate(traced.astype(np.uint8), np.ones((2 * edge + 1, 2 * edge + 1), np.uint8)) > 0
     ring = grown & ~polygon & (rgba[..., 3] > 0) & (reach >= 2) & ~keep_out
     if legs is not None:
         ring &= ~(legs > 127)
@@ -98,6 +127,17 @@ def band(rgba, polygon, garment, legs=None, keep_out=None):
             shade = 1 - SHADE_AT_HEM - (SHADE - SHADE_AT_HEM) * np.clip(up[cy, cx], 0, 1)
             fill[cy, cx, :3] = np.clip(np.rint(colour[cx, :3] * shade[:, None]), 0, 255).astype(np.uint8)
             fill[cy, cx, 3] = np.clip(np.rint(colour[cx, 3]), 0, 255).astype(np.uint8)
+    if garment.get("material") and banded.any():
+        # The ink stroke may run over another visible fabric. Carry its immediate outside
+        # neighbor across the cut seam, preserving transparent background at a silhouette.
+        # Interior underlayers are still supplied solely by the approved source-aligned patch.
+        border_distance, nearest = cv2.distanceTransformWithLabels(
+            region.astype(np.uint8), cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL,
+        )
+        seam = banded & ((border_distance <= 2 * edge + 2) | (region & ~polygon))
+        if seam.any():
+            samples = rgba[~region]
+            fill[seam] = samples[nearest[seam] - 1]
     rows_banded = np.nonzero(banded.any(1))[0]
     report = {
         "band": round(depth_at_hem, 1),

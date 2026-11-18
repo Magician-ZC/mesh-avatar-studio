@@ -1,6 +1,7 @@
 """Run with the same uv --with dependencies as build-layers.py."""
 
 import copy
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -60,6 +61,31 @@ class BuildLayersTest(unittest.TestCase):
         ImageDraw.Draw(full).rectangle((20, 45, 80, 70), fill=(255, 80, 150, 255))
         full.save(self.project / "source.png")
         return full
+
+    def test_garment_patch_is_visible_on_the_new_base_and_hidden_by_the_resting_skirt(self):
+        original = self.add_skirt()
+        folder = self.project / "patches"
+        folder.mkdir()
+        patch = Image.new("RGBA", original.size)
+        ImageDraw.Draw(patch).rectangle((40, 60, 70, 68), fill=(61, 90, 176, 255))
+        path = folder / "skirt.png"
+        patch.save(path)
+        (folder / "manifest.json").write_text(json.dumps([{
+            "name": "skirt", "kind": "underwear", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }]))
+        built = self.run_cli("--cloth-under", "keep", "--garment-patches", str(folder))
+        self.assertEqual(built.returncode, 0, built.stderr)
+        directory = self.project / "built"
+        meta = json.loads((directory / "layers.json").read_text())
+        self.assertEqual(meta["garmentUnderlayers"]["skirt"]["rect"], [40, 60, 31, 9])
+        with Image.open(directory / "base_cloth.png") as legacy, Image.open(directory / "base_garment_inner.png") as new_base:
+            self.assertEqual(legacy.getpixel((45, 63)), original.getpixel((45, 63)))
+            self.assertEqual(new_base.getpixel((45, 63)), patch.getpixel((45, 63)))
+            visible = new_base.copy()
+        with Image.open(directory / "cloth_skirt.png") as outer:
+            x, y, _, _ = meta["layers"]["cloth_skirt"]
+            visible.alpha_composite(outer, (x, y))
+        self.assertEqual(visible.getpixel((45, 63)), original.getpixel((45, 63)))
 
     def test_cloth_under_keep_keeps_the_garments_and_never_reads_source_under(self):
         self.add_skirt()
@@ -1080,6 +1106,28 @@ class HemBandTest(unittest.TestCase):
         rgb = above[..., :3] * a + below[..., :3] * b * (1 - a)
         alpha = a + b * (1 - a)
         return np.concatenate([rgb / np.maximum(alpha, 1e-6), alpha * 255], -1)
+
+    def test_lift_reveals_the_two_source_legs_and_stage_between_them(self):
+        # A long skirt needs no generated patch. The two sides intentionally have different
+        # colours, so copying one exposed calf into both legs would fail this fixture.
+        image = Image.fromarray(self.source)
+        x0, x1 = self.LEGS[1]
+        other = (75, 57, 61, 255)
+        ImageDraw.Draw(image).rectangle((x0, self.HEM + 1, x1, self.SIZE[1]-1), fill=other)
+        image.save(self.project / "source.png")
+        bones = {side: {k: [cx, y] for k, y in (("hip", 143), ("knee", 198), ("ankle", 289))}
+                 for side, cx in (("left", 81), ("right", 119))}
+        entry = {"name": "skirt", "kind": "skin", "legReveal": True, "legs": bones}
+        (self.project / "manifest.json").write_text(json.dumps([entry]))
+        built = self.build("--cloth-under", "hem", "--garment-patches", str(self.project))
+        self.assertEqual(built.returncode, 0, built.stderr)
+        cut = self.meta()["garmentUnderlayers"]["skirt"]
+        self.assertEqual(self.layer(cut["legs"]["left"])[196, 81].tolist(), list(self.LEG))
+        self.assertEqual(self.layer(cut["legs"]["right"])[196, 119].tolist(), list(other))
+        self.assertEqual(self.layer(cut["layer"])[196, 100, 3], 0)
+        self.assertEqual(self.image("base_garment_inner")[196, 100, 3], 0)
+        self.assertEqual(self.layer(cut["clear"])[196, 100, 3], 255)
+        self.assertEqual(self.layer("cloth_skirt")[196, 100].tolist(), list(self.SKIRT))
 
     def test_the_band_follows_the_travel_and_the_picture_stays_the_same_at_rest(self):
         result = self.build("--cloth-under", "hem", "--hem-legs", str(self.project / "legs.png"))

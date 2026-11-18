@@ -37,6 +37,8 @@ the engine mapping. Do not copy the example illustration's coordinates into a ne
 | `body.maxRoll` | Body rotation at a ±10° body pose, radians; start near `0.035`. |
 | `body.breathBand` | Y range, px, where breathing fades to zero; upper chest to bottom. |
 | `body.rollBand` | Y range, px, where body roll fades to zero; upper body to anchored lower torso. |
+| `body.softChest.left`, `.right` | Optional pair of image-left and image-right ellipses in source pixels. Each describes tissue attached to the torso. A sustained chest grab displaces the held side in the image plane and in depth. |
+| `body.softChest.support` | Support from fitted clothing or the torso, from 0 to 1. Higher values reduce travel and damp the return. Defaults to 0.35. |
 | `body.chest.cx` | Chest centre x, px; centre of visible upper torso. |
 | `body.chest.cy` | Chest centre y, px; below neck and above lower torso. |
 | `body.chest.rx` | Chest horizontal radius, px; cover torso inside the arms. |
@@ -184,7 +186,8 @@ Coordinates are source-image pixels, with x increasing right and y increasing do
 | `cloth[*].cohesion` | Integer smoothing passes over column angles and angular velocities, `0..8`; default `3`. |
 | `cloth[*].wind` | Nonnegative coherent breeze strength as a fraction of `max`; default `0.05`, `0` disables wind. All columns receive the same phase. |
 | `cloth[*].max` | Positive soft limit on grid displacement from the body-carried shape, px; default `20`. Limits rotation at the hem and reserves up to 10% for weak vertical bounce. Extrapolated mesh points outside the grid can move farther. |
-| `cloth[*].reach` | Optional positive distance, px: how far a held hem may be pulled from where it hangs (`grab({ kind: 'cloth' })`, WebGL runtime only), never beyond `max`. Without it the garment is not held and a drag swings its hem as before. |
+| `cloth[*].reach` | Optional positive grab distance in source pixels. The original hem grab (`kind: 'cloth'`) is limited by `max`. A material grab (`kind: 'fabric'`) can use the full `reach` where the package provides the underlayer for that garment. Elsewhere it stays within the filled hem band (`max`). |
+| `cloth[*].material` | Optional garment material. A positive `reach` enables sustained grabbing. `stocking` stretches across the leg, `pleat` lifts towards its fixed waist, and `woven` follows a fitted panel. The grab uses source-pixel offsets and signed depth from −1 to 1. Fitted garments follow the body even when they have no grab. |
 | `cloth[*].behind` | Optional boolean, default `false`; draw before the bare base when true. Changing depth requires rebuilding overlapping cutouts. |
 | `cloth[*].parent` | Optional name of an **earlier** cloth entry. Its displaced grid drives this garment's waist, useful for rear tails attached to a skirt. |
 | `body.hip.shift` | Optional full-body sideways travel at `bodyAngleX=10`, px. Supply with `band` to fade sideways motion toward planted feet. |
@@ -338,6 +341,7 @@ and `legs`; the same limb must not be bound in both places.
 | `limbs[*].behind` | Optional boolean, default `false`; draw before the bare base instead of after the garments and overlays. |
 | `limbs[*].swing` | Optional swing limit about the root in degrees, `0..10`, default `4`. |
 | `limbs[*].bend` | Optional bend limit at the middle joint in degrees, `0..12`, default `6`. |
+| `limbs[*].coveredSleeveWidth` | Visible sleeve width in source pixels where a foreground strap crosses the forearm. The builder uses this measurement and the visible cuff to complete the sleeve behind the bag. |
 | `mesh.limbCell` | Optional integer limb mesh spacing, px; defaults to `baseCell`. |
 
 Parameters `limb:<name>:swing` and `limb:<name>:bend` run from `-1` to `1` (times the limits), default `0`. Positive swing

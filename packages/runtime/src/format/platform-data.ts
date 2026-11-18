@@ -10,12 +10,14 @@ export interface AvatarCapabilitiesData {
   style?: string;
   face?: { blink?: boolean; mouth?: boolean; gaze?: boolean; brows?: boolean };
   head?: { turn?: boolean; roll?: boolean };
-  body?: { breath?: boolean; lean?: boolean; sway?: boolean };
+  body?: { breath?: boolean; lean?: boolean; sway?: boolean; softChest?: boolean };
   legs?: boolean;
   arms?: boolean;
   limbs?: { name: string; kind: string; free: boolean }[];
   strands?: string[];
   cloth?: string[];
+  fabrics?: string[];
+  underlayers?: string[];
   zones?: string[];
   motions?: { id: string; idle: boolean }[];
 }
@@ -81,14 +83,14 @@ export function parseCapabilitiesData(value: unknown, path: string, errors: Erro
   if (value.style !== undefined) result.style = text(value.style, `${path}.style`, errors);
   if (value.face !== undefined) result.face = flags(value.face, ['blink', 'mouth', 'gaze', 'brows'] as const, `${path}.face`, errors);
   if (value.head !== undefined) result.head = flags(value.head, ['turn', 'roll'] as const, `${path}.head`, errors);
-  if (value.body !== undefined) result.body = flags(value.body, ['breath', 'lean', 'sway'] as const, `${path}.body`, errors);
+  if (value.body !== undefined) result.body = flags(value.body, ['breath', 'lean', 'sway', 'softChest'] as const, `${path}.body`, errors);
   if (value.legs !== undefined) result.legs = flag(value.legs, `${path}.legs`, errors);
   if (value.arms !== undefined) result.arms = flag(value.arms, `${path}.arms`, errors);
   if (value.limbs !== undefined) result.limbs = records(value.limbs, `${path}.limbs`, errors, (item, at) => {
     const name = text(item.name, `${at}.name`, errors), kind = text(item.kind, `${at}.kind`, errors), free = flag(item.free, `${at}.free`, errors);
     return name !== undefined && kind !== undefined && free !== undefined ? { name, kind, free } : undefined;
   });
-  for (const key of ['strands', 'cloth', 'zones'] as const) {
+  for (const key of ['strands', 'cloth', 'fabrics', 'underlayers', 'zones'] as const) {
     if (value[key] !== undefined) result[key] = strings(value[key], `${path}.${key}`, errors);
   }
   if (value.motions !== undefined) result.motions = records(value.motions, `${path}.motions`, errors, (item, at) => {

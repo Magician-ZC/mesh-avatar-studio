@@ -217,6 +217,16 @@ def _thin(alpha):
     return (alpha > 0) & ~_thick(alpha)
 
 
+def contour_matte(alpha, paths, eye_distance):
+    """A clean plate can leave a faint inverse of the jaw a little inside the skin.
+    Move it with the cheek while retaining the soft edges of real strands in front."""
+    band = np.zeros(alpha.shape, np.uint8)
+    for path in paths:
+        cv2.polylines(band, [np.rint(path).astype(np.int32)], False, 255, max(2 * LINE + 1, round(0.17 * eye_distance)))
+    hair = cv2.dilate((alpha >= 96).astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
+    return (band > 0) & (alpha > 0) & ~hair
+
+
 def over(below, above):
     """`above` over `below` (straight 8-bit RGBA)."""
     a = above[..., 3:4].astype(np.float32) / 255
@@ -448,8 +458,10 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
         # part of hair reaching out of that band (hair crossing the contour stays in front). The band reaches further
         # out than in (OUTER px): the line is drawn outside the skin's edge, and can lie a few px off the traced one
         band = np.zeros((h, w), np.uint8)
+        paths = []
         for sign, smooth, *_ in traced.values():
             pts = np.rint(np.array([_point(f, sign * x, y) for x, y in zip(smooth, rows)])).astype(np.int32)
+            paths.append(pts[:end + 1])
             cv2.polylines(band, [pts], False, 255, 2 * LINE + 1)
             out = np.rint(np.array([_point(f, sign * (x + (LINE + OUTER) / 2), y) for x, y in zip(smooth, rows)])).astype(np.int32)
             cv2.polylines(band, [out], False, 255, OUTER - LINE + 1)
@@ -463,6 +475,7 @@ def cut(drawn, hair, rig, excluded, polygon_mask, head=None):
         for _ in range(LINE_HAIR):
             reached = cv2.dilate(reached, np.ones((3, 3), np.uint8)) & within
         moved = (band > 0) & (alpha > 0) & (reached == 0)
+        moved |= contour_matte(alpha, paths, D)
         # beside each contour, as far out as a pull with the layer's stroke can reach: pieces of hair_front there that are
         # residue of the matting (no larger than SPECK px, or thinner than THICK px and staying beside the contour, and
         # neither reaching more than LINE px into the face) go to face_skin as well, so a pulled cheek covers them instead

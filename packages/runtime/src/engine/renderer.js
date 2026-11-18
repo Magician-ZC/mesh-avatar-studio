@@ -8,9 +8,10 @@ import { deviceToSource, placeView, rotateVertexShader, sourceToDevice, viewRota
  * @param {import('../rig/types').Rig} rig */
 export function createRenderer(engine, rig) {
   const { IMG, EYES, MOUTH, CHEEKS } = engine;
-  const NO_PULL = new Float32Array(8);
+  const NO_PULL = new Float32Array(8), NO_SURFACE_LIGHT = new Float32Array(12), NO_HEM_CONTACT = new Float32Array(8);
   // ER6: the whole drawing turns by rig.view.rotation about the image centre; 0 keeps the original shaders and fit
   const ROTATION = viewRotation(rig);
+  const hasSurfaceLighting = Boolean(rig.body.softChest || rig.cloth?.some(cloth => cloth.material));
   // WebGL2 renderer: textured grid meshes whose vertices are deformed on the CPU,
   // plus a fragment-shader pass for eyelids, eye balls, mouth and blush on the base layer.
 
@@ -20,6 +21,26 @@ export function createRenderer(engine, rig) {
   uniform vec2 uScale; uniform vec2 uOffset;
   out vec2 vUv;
   void main() { vUv = aUv; gl_Position = vec4(aPos * uScale + uOffset, 0.0, 1.0); }`;
+
+  // Older rigs compile the original fragment shader for both lighting modes.
+  const surfaceUniforms = hasSurfaceLighting ? `
+  uniform vec4 uGripLight[3]; // local centres, radii and signed thickness for the drawn surface
+  uniform vec4 uHemContact[2]; // image x of the legs and gap, then the corresponding contact opacity changes` : '';
+  const surfaceShading = hasSurfaceLighting ? `
+    for (int i = 0; i < 3; ++i) {
+      vec4 s = uGripLight[i];
+      if (s.w != 0.0) {
+        vec2 q = (p - s.xy) / s.z;
+        float light = s.w * max(0.0, 1.0 - dot(q,q)) * (0.08 - 0.16 * q.y - 0.07 * q.x);
+        c.rgb = light > 0.0 ? mix(c.rgb, vec3(c.a), light) : c.rgb * (1.0 + light);
+      }
+    }
+    vec3 hemX = uHemContact[0].xyz, shade = uHemContact[1].xyz;
+    if (any(notEqual(shade, vec3(0.0)))) {
+      float change = p.x < hemX.y ? mix(shade.x, shade.y, smoothstep(hemX.x, hemX.y, p.x))
+                                  : mix(shade.y, shade.z, smoothstep(hemX.y, hemX.z, p.x));
+      c *= 1.0 + change;
+    }` : '';
 
   const FS = `#version 300 es
   precision highp float;
@@ -38,7 +59,7 @@ export function createRenderer(engine, rig) {
   uniform vec4 uCheeks;      // x0, y0, x1, y1
   uniform float uCheek;
   uniform vec4 uPull[2];     // per cheek layer: swell centre (rest px), radius (px), depth (-1..1, 0 = none)
-
+${surfaceUniforms}
   const int EYE_N = 24;
   float crv(int e, bool top, float u) {
     float f = clamp(u, 0.0, 1.0) * float(EYE_N - 1);
@@ -181,7 +202,7 @@ export function createRenderer(engine, rig) {
       c = eyeLayer(uFace - (kind == 2 ? 8 : (kind == 1 ? 6 : 2)), p, kind);
     } else {
       c = texAt(p);
-    }
+    }${surfaceShading}
     outColor = c * uAlpha;
   }`;
 
@@ -513,6 +534,10 @@ export function createRenderer(engine, rig) {
       gl.uniform4fv(m.u.uRect, L.mesh.rect);
       gl.uniform1i(m.u.uFace, L.faceMode);
       gl.uniform1f(m.u.uAlpha, alpha);
+      if (hasSurfaceLighting) {
+        gl.uniform4fv(m.u.uGripLight, L.surfaceLight ?? NO_SURFACE_LIGHT);
+        gl.uniform4fv(m.u.uHemContact, L.hemContact ?? NO_HEM_CONTACT);
+      }
       if (L.replace) gl.blendFunc(gl.ONE, gl.ZERO);
       gl.drawElements(gl.TRIANGLES, L.mesh.tris.length, gl.UNSIGNED_INT, 0);
       if (L.replace) gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);

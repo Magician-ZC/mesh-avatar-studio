@@ -144,6 +144,83 @@ def garment_beside(rgba, mask, visible):
     return plain if whole.any() else visible
 
 
+def complete_sleeve(rgba, mask, limb, torso_x, store):
+    """A foreground strap can hide the inner half of a sleeve. Continue the free cuff's
+    cross-section through that notch in forearm coordinates, carrying the sleeve's weave,
+    and keep the occluding bag on a separate layer attached to the torso."""
+    width = limb.get("coveredSleeveWidth")
+    if not width:
+        return
+    elbow, wrist = np.asarray(limb["joints"][1:], np.float32)
+    axis = wrist - elbow
+    length = np.linalg.norm(axis)
+    axis /= length
+    inward = np.array([axis[1], -axis[0]])
+    if (torso_x - elbow[0]) * inward[0] < 0:
+        inward = -inward
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        return
+    h, w = mask.shape
+    y0, y1 = max(0, int(ys.min() - 2 * width)), min(h, int(ys.max() + 2 * width + 1))
+    x0, x1 = max(0, int(xs.min() - 2 * width)), min(w, int(xs.max() + 2 * width + 1))
+    y, x = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+    along = (x - elbow[0]) * axis[0] + (y - elbow[1]) * axis[1]
+    across = (x - elbow[0]) * inward[0] + (y - elbow[1]) * inward[1]
+    start, stop = int(-0.4 * length), int(length)
+    rows = np.clip(np.rint(along).astype(np.int32) - start, 0, stop - start)
+    visible = mask[y0:y1, x0:x1] & (along >= start) & (along <= stop)
+    lo = np.full(stop - start + 1, np.inf, np.float32)
+    hi = np.full_like(lo, -np.inf)
+    np.minimum.at(lo, rows[visible], across[visible])
+    np.maximum.at(hi, rows[visible], across[visible])
+    samples = np.flatnonzero(np.isfinite(hi))
+    if not len(samples):
+        return
+    def contour(values):
+        v = np.interp(np.arange(len(values)), samples, values[samples]).astype(np.float32)
+        return cv2.GaussianBlur(v[:, None], (1, 0), sigmaX=0, sigmaY=max(2, width * 0.025)).ravel()
+    outer, inner = contour(lo), contour(hi)
+    cuff = (samples + start >= length * 0.73) & (samples + start <= length * 0.94)
+    if not cuff.any():
+        return
+    full = np.clip(np.median((inner - outer)[samples[cuff]]), width, width * 1.5)
+    # Where the visible arm already has its full section the original drawing is complete.
+    deficit = np.maximum(0, full - (inner - outer))
+    ease = np.clip(np.arange(len(lo)) / (0.26 * length), 0, 1)
+    extra = deficit * ease * np.clip((deficit - 0.10 * full) / (0.18 * full), 0, 1)
+    extra = cv2.GaussianBlur(extra[:, None], (1, 0), sigmaX=0, sigmaY=max(2, width * 0.04)).ravel()
+    # The drawn piping at the bag's edge can occupy part of the segmented sleeve.
+    # Replace that strip as well, so the swinging arm carries only its own leather.
+    boundary = inner[rows] - np.minimum(extra[rows] * 0.5, 0.15 * full)
+    depth = across - boundary
+    valid = (along >= start) & (along < stop) & (extra[rows] > 1)
+    region = valid & (depth >= 0) & (across <= inner[rows] + extra[rows]) & (rgba[y0:y1, x0:x1, 3] >= SOLID)
+    if not region.any():
+        return
+    # Follow the same folds across the hidden side without reflecting the painted
+    # silhouette or repeating the piping. The far edge samples the sleeve's core.
+    strip = np.maximum(2, boundary - outer[rows])
+    donor = boundary - strip * (0.18 + 0.36 * np.tanh(np.maximum(depth, 0) / (0.36 * strip)))
+    map_x = (elbow[0] + along * axis[0] + donor * inward[0]).astype(np.float32)
+    map_y = (elbow[1] + along * axis[1] + donor * inward[1]).astype(np.float32)
+    sleeve = cv2.remap(rgba, map_x, map_y, cv2.INTER_LINEAR)
+    # Blend across the original sleeve on the moving bone, before reaching the occluder.
+    seam = np.clip(depth / np.maximum(1, inner[rows] - boundary), 0, 1)
+    seam = np.where(mask[y0:y1, x0:x1], seam**2 * (3 - 2 * seam), 1)
+    edge = np.clip(inner[rows] + extra[rows] - across, 0, 1)
+    sleeve[..., 3] = np.where(region, 255 * seam * edge, 0).astype(np.uint8)
+    # The bag extends to the body side of the sleeve; it stays in front throughout the arm's swing.
+    covered = valid & (depth >= 0) & (depth <= extra[rows] + reach(limb)) & (rgba[y0:y1, x0:x1, 3] >= SOLID)
+    front = rgba[y0:y1, x0:x1].copy()
+    front[..., 3] = np.where(covered, 255, 0).astype(np.uint8)
+    for prefix, image in (("sleeve", sleeve), ("sleeve_cover", front)):
+        tile, rect = crop(image, image[..., 3] > 0)
+        rect[0] += x0
+        rect[1] += y0
+        store(f"{prefix}_{limb['name']}", tile, rect)
+
+
 def cut(rgba, base, rig, store, texture=None):
     """Store limb_<name> for every limb; return base_bare (the runtime base without the limbs). `texture`: a fill
     `texture(rgba, hole, source)` returning RGBA with the hole filled from the `source` pixels (tools/cloth/behind.py),
@@ -157,6 +234,7 @@ def cut(rgba, base, rig, store, texture=None):
         layer = rgba.copy()
         layer[..., 3] = np.where(mask, rgba[..., 3], 0).astype(np.uint8)
         store(f"limb_{limb['name']}", *crop(layer, mask))
+        complete_sleeve(rgba, mask, limb, rig["body"]["chest"]["cx"] if "body" in rig else rgba.shape[1] * 0.5, store)
         if not mask.any():
             continue
         hole = mask.astype(np.uint8) * 255

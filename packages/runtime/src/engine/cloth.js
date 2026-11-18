@@ -44,6 +44,7 @@ export function createCloth(engine, rig) {
 
   const garments = (rig.cloth ?? []).map(c => {
     const grid = clothGrid(c);
+    const fitted = c.material === 'stocking' || c.material === 'woven';
     const cols = grid.custom ? grid.cols : (c.columns ?? 8), rows = grid.custom ? grid.rows : (c.rows ?? 5);
     const top = resample(c.waist, cols), bot = resample(c.hem, cols);
     const rest = new Float64Array(rows * cols * 2);
@@ -60,7 +61,8 @@ export function createCloth(engine, rig) {
       return !grid.custom && Math.hypot(rest[bottom] - rest[top], rest[bottom + 1] - rest[top + 1]) <= 1;
     });
     return {
-      grid, pinned, pendulums: /** @type {ReturnType<typeof pendulumSystem>[]} */ ([]), systemKey: null,
+      grid, pinned, fitted, gridWeights: fitted ? Array.from({ length: rest.length / 2 }, (_, i) => baseWeights(rest[i * 2], rest[i * 2 + 1], 0)) : null,
+      pendulums: /** @type {ReturnType<typeof pendulumSystem>[]} */ ([]), systemKey: null,
       c, gravity: 9.80665 / (c.scale === undefined ? metersPerPixel : c.scale / 1000),
       tuning: Object.fromEntries(Object.entries({ ...CLOTH_DEFAULTS, ...CLOTH_OPTIONAL_DEFAULTS }).map(([key, value]) => [key, c[key] ?? value])),
       cols, rows, rest, top: grid.custom ? grid.top : top, weights: (grid.custom ? grid.top : top).map(([x, y]) => baseWeights(x, y, 0)),
@@ -76,7 +78,7 @@ export function createCloth(engine, rig) {
   // Grid coordinates of a point: the cell and its bilinear (s, t). Points outside the grid get
   // the nearest cell, extrapolated, so ruffles past the waist or hem line still follow it.
   function locate(g, x, y) {
-    const bounded = g.grid.custom || g.pinned.some(Boolean);
+    const bounded = !!g.c.material || g.grid.custom || g.pinned.some(Boolean);
     let best = null;
     for (let r = 0; r < g.rows - 1; r++) for (let k = 0; k < g.cols - 1; k++) {
       const q = [(r * g.cols + k) * 2, (r * g.cols + k + 1) * 2, ((r + 1) * g.cols + k + 1) * 2, ((r + 1) * g.cols + k) * 2];
@@ -145,9 +147,13 @@ export function createCloth(engine, rig) {
     /** Skin a layer mesh (rest/pos arrays in source px) to the named garment. */
     attach(name, mesh) {
       const g = byName[name];
-      const locs = [];
-      for (let i = 0; i < mesh.rest.length; i += 2) locs.push(locate(g, mesh.rest[i], mesh.rest[i + 1]));
-      g.meshes.push({ mesh, locs });
+      const locs = [], skin = [];
+      for (let i = 0; i < mesh.rest.length; i += 2) {
+        const x = mesh.rest[i], y = mesh.rest[i + 1];
+        if (g.fitted) skin.push(baseWeights(x, y, 0));
+        else locs.push(locate(g, x, y));
+      }
+      g.meshes.push({ mesh, locs, skin });
     }
 
     step(P, dt, phys) {
@@ -156,6 +162,19 @@ export function createCloth(engine, rig) {
       const a = [0, 0];
       for (const g of garments) {
         const { cols, rows, rest, target, out, angle, angularVelocity, lowerAngle, lowerAngularVelocity, bounce, bounceVelocity } = g;
+        if (g.fitted) {
+          // A stocking moves with the leg and a fitted placket with the torso. Only the grabbed patch lifts away.
+          for (let i = 0; i < rest.length; i += 2) {
+            deformBase(rest[i], rest[i + 1], g.gridWeights[i / 2], P, phys, a);
+            out[i] = a[0]; out[i + 1] = a[1];
+          }
+          g.physicalOut.set(out);
+          for (const { mesh, skin } of g.meshes) for (let i = 0; i < mesh.rest.length; i += 2) {
+            deformBase(mesh.rest[i], mesh.rest[i + 1], skin[i / 2], P, phys, a);
+            mesh.pos[i] = a[0]; mesh.pos[i + 1] = a[1];
+          }
+          continue;
+        }
         const { stiffness, damping, max, swing, follow, cohesion, wind, responseGain, tierGain, highModeDamping } = g.tuning;
         const gain = this.gain * (responseGain ?? 1);
         const pivots = new Float64Array(cols * 2), renderPivots = new Float64Array(cols * 2), acceleration = new Float64Array(cols * 2);

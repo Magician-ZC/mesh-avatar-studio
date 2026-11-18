@@ -48,6 +48,8 @@ export interface ClothTuning {
   max: number;
 }
 export interface Cloth extends Partial<ClothTuning> {
+  /** Surface attachment and material response for a sustained local grab. */
+  material?: 'stocking' | 'pleat' | 'woven';
   /** Physical image scale in millimetres per source pixel; inferred if omitted. */
   scale?: number;
   name: string;
@@ -126,6 +128,8 @@ export interface Limb {
   joints: [Point, Point, Point];
   /** Cut-out polygon of the limb, source pixels. */
   outline: Point[];
+  /** Width measured on the free sleeve where a foreground strap crosses this arm, in source pixels. */
+  coveredSleeveWidth?: number;
   /** Draw before the base drawing instead of in front of it. */
   behind?: boolean;
   /** Swing limit about the root in degrees, 0..10, default 4. */
@@ -159,6 +163,8 @@ export interface Rig {
   body: {
     pivotX: number; pivotY: number; maxRoll: number;
     breathBand: Band; rollBand: Band; chest: Ellipse; shoulders: Ellipse[];
+    /** Resting soft-tissue footprints in image coordinates; support ranges from loose (0) to firm (1). */
+    softChest?: { left: Ellipse; right: Ellipse; support?: number };
     hip?: { shift: number; band: Band };
   };
   face: Record<'nose' | 'mouth' | 'eyeA' | 'eyeB' | 'earL' | 'earR', Ellipse> & {

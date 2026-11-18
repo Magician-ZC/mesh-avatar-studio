@@ -71,6 +71,7 @@ IRIS_LAYERS = Path(__file__).resolve().parent / "eye" / "iris.py"
 CHEEK_PULL = Path(__file__).resolve().parent / "head" / "cheeks.py"
 STRAND_LAYERS = Path(__file__).resolve().parent / "hair" / "strands.py"
 _cheek_pull = None
+SKIRT_LEGS = Path(__file__).resolve().parent / "cloth" / "legs.py"
 HEM_BAND = Path(__file__).resolve().parent / "cloth" / "hem.py"
 _hem_band = None
 BEHIND = Path(__file__).resolve().parent / "cloth" / "behind.py"
@@ -297,7 +298,7 @@ def behind_front(rgba, region, band, fill, front):
     return out
 
 
-def fill_behind(rgba, base, area, garment=None):
+def fill_behind(rgba, base, area, garment=None, store=None, name=None):
     """The base behind accessories cut by an outline (a handbag hanging over a skirt): the garment goes on behind them
     with its own texture - its print, folds and seams copied from round it (tools/cloth/behind.py) - as far as the
     figure's outline, interpolated across them, reaches, with a smooth edge there; beyond it, where they hung over the
@@ -308,6 +309,35 @@ def fill_behind(rgba, base, area, garment=None):
     if garment is not None and (garment & source).sum() >= inside.sum():
         source &= garment
     filled = behind_fill().fill(rgba, inside, source)
+    if garment is not None and store is not None:
+        # The hard accessory outline includes its antialiased fringe and contact shadow.
+        # Reconstruct a wider piece, then crossfade in visible cloth beyond the old edge.
+        # The outer collar is a separate layer shown as the accessory swings away.
+        _, _, width, height = cv2.boundingRect(area)
+        radius = min(90, round(0.14 * min(width, height)))
+        if radius >= behind_fill().PATCH:
+            distance = cv2.distanceTransform((~inside).astype(np.uint8), cv2.DIST_L2, 5)
+            wide = distance <= radius
+            donors = source & ~wide
+            cloth = behind_fill().fill(rgba, wide, donors, align_tiers=True)
+            behind_fill().continue_seams(rgba, cloth, wide, garment)
+            # The wider opening can move the inferred garment silhouette. Map its colours
+            # to the established silhouette and keep the original coverage there.
+            x, y, w, h = cv2.boundingRect(wide.astype(np.uint8))
+            roi = (slice(y, y + h), slice(x, x + w))
+            patch = cloth[roi].copy()
+            valid = patch[..., 3] >= 128
+            _, nearest = cv2.distanceTransformWithLabels((~valid).astype(np.uint8), cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL)
+            yy, xx = np.nonzero(valid)
+            if len(xx):
+                patch[~valid, :3] = patch[yy[nearest[~valid] - 1], xx[nearest[~valid] - 1], :3]
+                inner = inside[roi]
+                filled[roi][inner, :3] = patch[inner, :3]
+                weight = np.clip((radius - distance[roi]) / (radius - 4), 0, 1)
+                collar = (rgba[roi][..., 3] >= 250) & ~inner
+                patch[..., 3] = np.where(inner, filled[roi][..., 3],
+                                         np.rint(255 * weight**2 * (3 - 2 * weight) * collar)).astype(np.uint8)
+                store(f"accessory_under_{name}", patch, [x, y, w, h])
     out = base.copy()
     out[inside] = filled[inside]
     return out
@@ -676,12 +706,19 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
         changed = (
             (diff > 24) & (rgba[..., 3] > 0) & ((under[..., 3] < 128) | (diff > 90))
         ).astype(np.uint8) * 255
+    foreground_limbs = np.zeros(shape, bool)
+    if rig.get("limbs") and any(c.get("material") for c in rig["cloth"]):
+        for limb, pixels in zip(rig["limbs"], limb_layers().masks(rgba, rig)):
+            if not limb.get("behind"):
+                foreground_limbs |= pixels
     masks = {}
     for cloth in rig["cloth"]:
         outline = polygon_mask(shape, cloth["outline"])
         if under is not None:
             # the drawn outline is approximate: reach a little past it for garment edges
             outline |= changed & cv2.dilate(outline, np.ones((31, 31), np.uint8))
+        if cloth.get("material"):
+            outline[foreground_limbs] = 0
         masks[cloth["name"]] = outline
     front = np.zeros(shape, np.uint8)
     for cloth in rig["cloth"]:
@@ -689,22 +726,29 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
             front |= masks[cloth["name"]]
     taken = np.zeros(shape, np.uint8)
     bands = []
-    for cloth in rig["cloth"]:
-        # a garment behind another loses what the front one covers; overlapping
-        # outlines of the same depth keep each pixel in the first garment only
+    material_edges = np.zeros(shape, bool)
+    soft_alpha = (rgba[..., 3] > 0) & (rgba[..., 3] < 255)
+    # Material surfaces are picked in draw order: the last foreground garment owns the visible pixels.
+    # Legacy rigs use their original first-garment overlap convention.
+    cut_order = reversed(rig["cloth"]) if any(c.get("material") for c in rig["cloth"]) else rig["cloth"]
+    for cloth in cut_order:
         mask = masks[cloth["name"]] & ~taken
         if cloth.get("behind"):
             mask &= ~front
         if cloth_under == "hem" and not cloth.get("behind"):
             others = np.zeros(shape, np.uint8)
             for other in rig["cloth"]:
-                if other["name"] != cloth["name"]:
+                if not cloth.get("material") and other["name"] != cloth["name"]:
                     others |= masks[other["name"]]
             keep_out = (others | taken | (covered if covered is not None else 0)) > 0
+            if cloth.get("material"):
+                keep_out |= foreground_limbs
             region, band, fill, report = hem_band().band(rgba, mask, cloth, legs, keep_out)
             if occluders is not None:
                 fill = behind_front(rgba, region, band, fill, occluders)
             mask = region.astype(np.uint8) * 255
+            if cloth.get("material"):
+                material_edges |= region & soft_alpha
             bands.append((band, fill))
             if notes is not None:
                 notes[cloth["name"]] = report
@@ -717,6 +761,9 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
         bare = base.copy()
         for band, fill in bands:
             bare[band] = fill[band]
+        # A translucent silhouette belongs to the sprite once. Keeping its alpha in both layers
+        # makes a 50% stocking edge 75% opaque at rest. Historical garments retain their old bake.
+        bare[material_edges] = 0
     elif under is not None:
         bare = base.copy()
         replace = (diff > 0) | (cv2.dilate(taken, np.ones((3, 3), np.uint8)) > 0)
@@ -725,6 +772,139 @@ def build_cloth(project, rig, rgba, base, store, images, cloth_under="auto", leg
         print("cloth: no source_under.png; filling the garment area by inpainting")
         bare = inpaint_rgba(base, cv2.dilate(taken, np.ones((7, 7), np.uint8)))
     images["base_cloth"] = bare
+
+
+def build_garment_underlayers(folder, entries, rig, meta, images, store, rgba):
+    """Bake approved garment crops, with separate source-matched legs beneath movable skirts."""
+    indexed = {item["name"]: item for item in entries if item.get("sha256") or item.get("legReveal")}
+    drawn = images.get("base_bare", images.get("base_cloth", images["base"]))
+    result = None
+    layers = {}
+    for cloth in rig.get("cloth", []):
+        name = cloth["name"]
+        entry = indexed.get(name)
+        if not entry:
+            continue
+        key = f"cloth_{name}"
+        x, y, w, h = meta["layers"][key]
+        patch = None
+        if entry.get("sha256"):
+            path = folder / f"{name}.png"
+            if hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
+                raise ValueError(f"garment patch {name}: bytes differ from the approved image")
+            with Image.open(path) as image:
+                if image.size != (drawn.shape[1], drawn.shape[0]):
+                    raise ValueError(f"garment patch {name}: expected source dimensions")
+                patch = np.array(image.convert("RGBA").crop((x, y, x + w, y + h)))
+        if entry.get("legReveal"):
+            if entry["kind"] == "underwear" and patch is None:
+                continue
+            spec = importlib.util.spec_from_file_location("mesh_avatar_skirt_legs", SKIRT_LEGS)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            bones = entry.get("legs") or rig.get("legs")
+            original = images[key][..., 3] > 0
+            # The fitted polygon can stop above the painted hem. Include the adjoining
+            # stocking/skin rows so their transition can be traced in the original picture.
+            extra = min(rgba.shape[0] - y - h, max(6, round(w * .29)))
+            original = np.pad(original, ((0, extra), (0, 0)))
+            if patch is not None:
+                patch = np.pad(patch, ((0, extra), (0, 0), (0, 0)))
+            h += extra
+            fit = module.recover(rgba, (x, y, w, h), original, bones) if bones else None
+            if not fit:
+                print(f"garment {name}: two visible leg silhouettes could not be traced", file=sys.stderr)
+                continue
+            outer, clear, surfaces, contact = fit
+            source = rgba[y:y + h, x:x + w]
+            skirt_height = min(h, int(np.flatnonzero(outer.any(1))[-1]) + 5)
+            images[key] = np.where(outer[:skirt_height, :, None], source[:skirt_height], 0)
+            meta["layers"][key] = [x, y, w, skirt_height]
+            drawn[y:y + h, x:x + w][original & ~outer] = source[original & ~outer]
+            if result is None:
+                result = drawn.copy()
+            layer = f"under_{name}"
+            # Store the erase mask independently of any resulting coverage. The gap between
+            # the thighs and the air beside a flared skirt must reveal the stage.
+            erase = np.zeros((h, w, 4), np.uint8)
+            erase[..., 3] = clear * 255
+
+            def store_local(key, pixels):
+                sx, sy, sw, sh = cv2.boundingRect(pixels[..., 3])
+                rect = [x + sx, y + sy, sw, sh]
+                store(key, pixels[sy:sy + sh, sx:sx + sw], rect)
+                return rect
+
+            restored = result[y:y + h, x:x + w]
+            restored[original & ~outer] = source[original & ~outer]
+            restored[clear] = 0
+            data = {"kind": entry["kind"], "source": "visible_legs", "layer": layer,
+                    "clear": layer + "_clear", "legs": {}}
+            store_local(data["clear"], erase)
+            back = module.coat_back(rgba, (x, y, w, h), outer, clear, surfaces, bones)
+            if back is not None:
+                data["back"] = layer + "_back"
+                store_local(data["back"], back)
+                visible = back[..., 3] > 0
+                restored[visible] = back[visible]
+            # The exposed fitted stocking is its own grabbable mesh. Give its overlapping
+            # pixels the same local lighting as the hidden thigh; the contact sprite carries
+            # the original hem shadow once, above the stockings.
+            for stocking in (part for part in rig["cloth"] if part.get("material") == "stocking"):
+                sock_key = f"cloth_{stocking['name']}"
+                px, py, pw, ph = meta["layers"][sock_key]
+                x0, y0 = max(x, px), max(y, py)
+                x1, y1 = min(x + w, px + pw), min(y + h, py + ph)
+                if x0 >= x1 or y0 >= y1:
+                    continue
+                overlap = np.s_[y0 - y:y1 - y, x0 - x:x1 - x]
+                fitted = images[sock_key].copy()
+                sock = fitted[y0 - py:y1 - py, x0 - px:x1 - px]
+                painted = False
+                for pixels in surfaces.values():
+                    thigh = pixels[overlap]
+                    changed = (contact[overlap][..., 3] > 0) & (thigh[..., 3] == 255) & (sock[..., 3] > 0)
+                    if changed.any():
+                        sock[..., :3][changed] = thigh[..., :3][changed]
+                        painted = True
+                if painted:
+                    variant = f"{layer}_{stocking['name']}"
+                    store(variant, fitted, [px, py, pw, ph])
+                    data.setdefault("stockings", {})[stocking["name"]] = variant
+            if contact[..., 3].any():
+                data["contact"] = layer + "_contact"
+                store_local(data["contact"], contact)
+            preview = Image.new("RGBA", (w, h))
+            for side, pixels in surfaces.items():
+                sprite = f"{layer}_leg_{side}"
+                store_local(sprite, pixels)
+                data["legs"][side] = sprite
+                preview.alpha_composite(Image.fromarray(pixels))
+            if patch is not None:
+                patch[~(clear & (source[..., 3] == 255))] = 0
+                if patch[..., 3].any():
+                    data["shorts"] = layer + "_shorts"
+                    store_local(data["shorts"], patch)
+                    preview.alpha_composite(Image.fromarray(patch))
+            data["rect"] = store_local(layer, np.asarray(preview))
+            layers[name] = data
+            continue
+        # Preserve the original anti-aliased outer edge at rest and exclude holes cut for foreground objects.
+        coverage = (patch[..., 3] == 255) & (images[f"cloth_{name}"][..., 3] == 255)
+        if not coverage.any():
+            continue
+        patch[~coverage] = 0
+        if result is None:
+            result = drawn.copy()
+        result[y:y + h, x:x + w][coverage] = patch[coverage]
+        sx, sy, sw, sh = cv2.boundingRect(coverage.astype(np.uint8))
+        layer = f"under_{name}"
+        rect = [x + sx, y + sy, sw, sh]
+        store(layer, patch[sy:sy + sh, sx:sx + sw], rect)
+        layers[name] = {"kind": entry["kind"], "layer": layer, "rect": rect}
+    if result is not None:
+        store("base_garment_inner", result, [0, 0, drawn.shape[1], drawn.shape[0]])
+        meta.update(garmentBase="base_garment_inner", garmentUnderlayers=layers)
 
 
 def validate_inputs(rig, rgba):
@@ -945,7 +1125,7 @@ def read_plate(path, size):
 
 
 def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False, head=False, plate=None, footprint=None,
-          hem_legs=None, cheeks=False, strand_layers_on=False):
+          hem_legs=None, cheeks=False, strand_layers_on=False, garment_patches=None, strand_garment=None):
     source = project / "source.png"
     rig_bytes = rig_path.read_bytes()
     rig = json.loads(rig_bytes)
@@ -973,12 +1153,19 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         options += b"cheek-pull:" + CHEEK_PULL.read_bytes()
     if strand_layers_on:
         options += b"strand-layers:" + STRAND_LAYERS.read_bytes()
+        if strand_garment is not None:
+            options += b"strand-garment:" + Path(strand_garment).read_bytes()
     if rig.get("limbs"):  # only rigs with limbs depend on the limb cutter
         options += b"limbs:" + LIMB_LAYERS.read_bytes() + b"behind:" + BEHIND.read_bytes()  # the body under them
     if any(accessory.get("outline") is not None for accessory in rig.get("accessories", [])):
         options += b"behind:" + BEHIND.read_bytes()  # what lies behind an accessory cut by an outline
     if any(eye.get("iris") is not None for eye in rig["eyes"]):  # only eyes with an iris depend on the iris cutter
         options += b"iris:" + IRIS_LAYERS.read_bytes()
+    entries = []
+    if garment_patches is not None:
+        manifest = (garment_patches / "manifest.json").read_bytes()
+        entries = json.loads(manifest)
+        options += b"garment-patches:" + manifest + (SKIRT_LEGS.read_bytes() if any(e.get("legReveal") for e in entries) else b"")
     build_id = hashlib.sha256(
         source.read_bytes() + rig_bytes + Path(__file__).read_bytes() + options
     ).hexdigest()[:12]
@@ -1109,14 +1296,21 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
         if np.any(outlined):
             # the texture behind them comes from the garments traced round them, never a hand or another accessory
             near = cv2.dilate(outlined, np.ones((21, 21), np.uint8)) > 0
-            garment = None
+            fabrics = {}
             for cloth in rig.get("cloth", []):
                 shape = polygon_mask((h, w), cloth["outline"]) > 0
                 if (shape & near).any():
-                    garment = shape if garment is None else garment | shape
-            if garment is not None:
-                garment &= (remove | accessory_bg) == 0
-            base = fill_behind(rgba, base, outlined, garment)
+                    fabrics[cloth["name"]] = shape & ((remove | accessory_bg) == 0)
+            for accessory in rig.get("accessories", []):
+                if accessory.get("outline") is not None:
+                    mask = accessory_mask(rgba, accessory)
+                    rim = cv2.dilate(mask, np.ones((21, 21), np.uint8)) > 0
+                    garment = max(fabrics, key=lambda name: np.count_nonzero(rim & fabrics[name]), default=None)
+                    source = fabrics[garment] if garment and (rim & fabrics[garment]).any() else None
+                    name = accessory["name"]
+                    base = fill_behind(rgba, base, mask, source, store, name)
+                    if f"accessory_under_{name}" in meta["layers"]:
+                        meta.setdefault("accessoryBacks", {})[name] = garment
     images["base"] = base
     images["hairmask"] = hair_mask(rgba, rig, external_hair)
     if rig.get("cloth"):
@@ -1190,11 +1384,15 @@ def build(project, rig_path, hairmask=None, cloth_under="auto", open_eyes=False,
     strand_notes = []
     if strand_layers_on and any(s.get("reach") for s in rig.get("strands", [])):
         drawn = images.get("base_bare", images.get("base_cloth", images["base"]))
-        cut, data, strand_notes = strand_layers().cut(drawn, external_hair if external_hair is not None else images["hairmask"], rig)
+        fabric = read_hairmask(strand_garment, (w, h), "--strand-garment") >= 128 if strand_garment is not None else None
+        cut, data, strand_notes = strand_layers().cut(drawn, external_hair if external_hair is not None else images["hairmask"], rig, fabric)
         for name, (image, rect) in cut.items():
             store(name, image, rect)
         if data:
             meta["strands"] = data
+
+    if entries:
+        build_garment_underlayers(garment_patches, entries, rig, meta, images, store, rgba)
 
     # Calculate everything before replacing files. Keep sprites and unrelated
     # assets intact; only filenames in this build's manifest are consumed.
@@ -1292,6 +1490,8 @@ def main():
         "it with the lock filled in, with which newer runtimes move a held lock without bending the base (a strand is "
         "left out, with the reason on stderr, when its lock cannot be told)",
     )
+    parser.add_argument("--garment-patches", type=Path, help="directory containing the approved, masked garment patches and manifest.json")
+    parser.add_argument("--strand-garment", type=Path, help="visible fabric mask for continuing textile grain behind a moving lock")
     args = parser.parse_args()
     if (args.head_plate is None) != (args.head_footprint is None):
         parser.error("--head-plate and --head-footprint go together")
@@ -1300,7 +1500,7 @@ def main():
     try:
         build(
             args.project_dir, args.project_dir / args.rig, args.hairmask, args.cloth_under, args.open_eyes, args.head_layers,
-            args.head_plate, args.head_footprint, args.hem_legs, args.cheek_pull, args.strand_layers,
+            args.head_plate, args.head_footprint, args.hem_legs, args.cheek_pull, args.strand_layers, strand_garment=args.strand_garment, garment_patches=args.garment_patches,
         )
     except (OSError, ValueError, KeyError, TypeError, cv2.error) as error:
         print(f"build-layers: {error}", file=sys.stderr)

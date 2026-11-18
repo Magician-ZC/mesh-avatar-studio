@@ -13,6 +13,10 @@ the English version takes precedence.
 - `projects/` and scratch `work/` are ignored. Do not stage them or bypass their ignore rules.
 - Keep `samples/` and `reference/` unchanged when preparing another illustration.
 - Visually inspect generated images before reporting success; report remaining defects.
+- MiraMate's material interactions include cheek pulls, three-axis chest deformation, skirt lifts and local
+  stocking stretch. Bind each leg and its hosiery behind the outer skirt, place any shorts at the hips,
+  and keep intervening background or back panels visible. The approved build-time patches are inner clothing,
+  underwear and skin adjacent to the moving garment. Review them on the existing generated characters.
 
 Use Node.js 22.17+ and Python 3.10+ with `uv`. Run:
 
